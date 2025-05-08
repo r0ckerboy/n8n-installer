@@ -76,7 +76,6 @@ services:
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
     ports:
       - "443:443"
-      - "5432:5432"
     volumes:
       - ${DATA_FOLDER}/letsencrypt:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -139,8 +138,6 @@ services:
       - traefik.tcp.routers.postgres.entrypoints=postgres
       - traefik.tcp.routers.postgres.tls=true
       - traefik.tcp.routers.postgres.tls.certresolver=mytlschallenge
-    ports:
-      - "127.0.0.1:5432:5432"
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -251,7 +248,11 @@ echo "Проверяем статус контейнеров..."
 docker ps
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 16. Создание скрипта бэкапа
+# 16. Проверка логов PostgreSQL
+echo "Проверяем логи PostgreSQL для диагностики..."
+docker logs root_postgres_1
+
+# 17. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -389,7 +390,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 17. Создание скрипта обновления с бэкапом
+# 18. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -412,9 +413,7 @@ send_telegram() {
 
 echo -e "${GREEN}Запускаем бэкап перед обновлением...${NC}"
 send_telegram "🟢 Начинаем обновление n8n и баз данных..."
-/root/
-
-backup-n8n.sh
+/root/backup-n8n.sh
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка бэкапа, обновление отменено${NC}"
     send_telegram "❌ Ошибка бэкапа, обновление отменено"
@@ -448,7 +447,7 @@ else
 fi
 EOF
 
-# 18. Настройка прав и cron
+# 19. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
@@ -468,7 +467,6 @@ echo "Папка для бэкапов: /root/n8n/backups"
 echo "Бэкапы настроены на каждую субботу в 23:00, отправка в Telegram (Chat ID: $TELEGRAM_CHAT_ID)"
 echo "Автообновление настроено на каждое воскресенье в 00:00, с удалением старых контейнеров n8n"
 echo "Уведомления и бэкапы отправляются в Telegram (Chat ID: $TELEGRAM_CHAT_ID)"
-echo -e "${GREEN}Для выполнения сохраните как 'install-n8n-enhanced.sh', затем выполните: chmod +x install-n8n-enhanced.sh && sudo ./install-n8n-enhanced.sh${NC}"
 echo -e "${GREEN}Для подключения к PostgreSQL используйте: psql -h pg.$DOMAIN_NAME -U $POSTGRES_USER -d n8n${NC}"
 echo -e "${GREEN}В pgAdmin настройте сервер: Host=pg.$DOMAIN_NAME, Port=5432, Username=$POSTGRES_USER, Database=n8n${NC}"
 echo -e "${GREEN}Бэкапы хранятся в Telegram, скачивайте их из чата (Chat ID: $TELEGRAM_CHAT_ID)${NC}"
