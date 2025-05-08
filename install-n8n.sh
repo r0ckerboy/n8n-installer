@@ -8,7 +8,7 @@ NC='\033[0m' # No Color
 # Логирование
 LOG_FILE="/root/n8n/logs/install.log"
 mkdir -p /root/n8n/logs
-echo "Логирование в $LOG_FILE..."
+echo "Логирование в $LOG_FILE..." | tee -a $LOG_FILE
 
 echo -e "${GREEN}Начинаем установку n8n, PostgreSQL, pgAdmin, Redis и Qdrant...${NC}" | tee -a $LOG_FILE
 
@@ -24,7 +24,7 @@ apt update >> $LOG_FILE 2>&1
 
 # 2. Установка необходимых пакетов
 echo "Устанавливаем необходимые пакеты..." | tee -a $LOG_FILE
-apt install curl software-properties-common ca-certificates -y >> $LOG_FILE 2>&1
+apt install curl software-properties-common ca-certificates lsof -y >> $LOG_FILE 2>&1
 
 # 3. Импорт GPG-ключа Docker
 echo "Импортируем GPG-ключ Docker..." | tee -a $LOG_FILE
@@ -59,6 +59,7 @@ mkdir -p /root/n8n/pgadmin
 chmod -R 777 /root/n8n/local-files # Разрешаем чтение/запись
 chmod -R 700 /root/n8n/backups # Ограничиваем доступ к бэкапам
 chmod -R 777 /root/n8n/pgadmin # Разрешаем доступ для pgAdmin
+chmod -R 777 /root/n8n/postgres # Разрешаем доступ для PostgreSQL
 
 # 9. Исправление прав доступа для n8n
 echo "Исправляем права доступа для /root/n8n/.n8n..." | tee -a $LOG_FILE
@@ -97,14 +98,12 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.postgres.address=:5432/tcp"
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
       - "--certificatesresolvers.mytlschallenge.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
       - "--log.level=DEBUG"
     ports:
       - "443:443"
-      - "5432:5432"
     volumes:
       - ${DATA_FOLDER}/letsencrypt:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -164,15 +163,11 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=n8n
     command: postgres -c listen_addresses=*
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
       - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
-    labels:
-      - traefik.enable=true
-      - traefik.tcp.routers.postgres.rule=HostSNI(`pg.${DOMAIN_NAME}`)
-      - traefik.tcp.routers.postgres.entrypoints=postgres
-      - traefik.tcp.routers.postgres.tls=true
-      - traefik.tcp.routers.postgres.tls.certresolver=mytlschallenge
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
       interval: 10s
@@ -190,6 +185,7 @@ services:
     volumes:
       - ${DATA_FOLDER}/pgadmin:/var/lib/pgadmin
       - /root/n8n/pgadmin/servers.json:/pgadmin4/servers.json
+      - /root/n8n/pgadmin/pgpassfile:/pgadmin4/pgpassfile
     labels:
       - traefik.enable=true
       - traefik.http.routers.pgadmin.rule=Host(`pgadmin.${DOMAIN_NAME}`)
@@ -241,7 +237,7 @@ services:
 EOF
 
 # 12. Создание pg_hba.conf для PostgreSQL
-echo "Создаем pg_hba.conf для разрешения внешних подключений..." | tee -a $LOG_FILE
+echo "Создаем pg_hba.conf для разрешения локальных и Docker-подключений..." | tee -a $LOG_FILE
 cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
 # Разрешаем подключения от всех IP (IPv4)
 host all all 0.0.0.0/0 md5
@@ -249,6 +245,8 @@ host all all 0.0.0.0/0 md5
 host all all ::/0 md5
 # Разрешаем локальные подключения
 local all all md5
+# Разрешаем подключения внутри Docker-сети
+host all all 172.0.0.0/8 md5
 EOF
 
 # 13. Запрос пользовательских данных
@@ -279,7 +277,7 @@ cat > /root/n8n/pgadmin/servers.json << EOF
     "1": {
       "Name": "n8n",
       "Group": "Servers",
-      "Host": "pg.${DOMAIN_NAME}",
+      "Host": "postgres",
       "Port": 5432,
       "MaintenanceDB": "n8n",
       "Username": "${POSTGRES_USER}",
@@ -290,7 +288,7 @@ cat > /root/n8n/pgadmin/servers.json << EOF
 }
 EOF
 # Создание pgpassfile для хранения пароля
-echo "pg.${DOMAIN_NAME}:5432:n8n:${POSTGRES_USER}:${POSTGRES_PASSWORD}" > /root/n8n/pgadmin/pgpassfile
+echo "postgres:5432:n8n:${POSTGRES_USER}:${POSTGRES_PASSWORD}" > /root/n8n/pgadmin/pgpassfile
 chmod 600 /root/n8n/pgadmin/pgpassfile
 
 # 15. Создание .env файла
@@ -314,38 +312,47 @@ EOF
 
 # 16. Проверка портов
 echo "Проверяем доступность портов 443, 5678, 5432..." | tee -a $LOG_FILE
-netstat -tuln | grep -E '443|5678|5432' && echo -e "${RED}Порты 443, 5678 или 5432 заняты, проверьте и освободите их${NC}" | tee -a $LOG_FILE && exit 1
+if netstat -tuln | grep -E ':443|:5678|:5432'; then
+    echo -e "${RED}Порты 443, 5678 или 5432 заняты:${NC}" | tee -a $LOG_FILE
+    lsof -i :443 >> $LOG_FILE 2>&1
+    lsof -i :5678 >> $LOG_FILE 2>&1
+    lsof -i :5432 >> $LOG_FILE 2>&1
+    echo -e "${RED}Освободите порты и повторите запуск${NC}" | tee -a $LOG_FILE
+    exit 1
+fi
 echo "Порты свободны" | tee -a $LOG_FILE
 
-# 17. Проверка DNS
-echo "Проверяем DNS для pg.${DOMAIN_NAME}..." | tee -a $LOG_FILE
-nslookup pg.${DOMAIN_NAME} >> $LOG_FILE 2>&1
-if [ $IPV6_ENABLED = false ]; then
-    if nslookup pg.${DOMAIN_NAME} | grep -q 'AAAA'; then
-        echo -e "${RED}ВНИМАНИЕ: DNS возвращает IPv6-адрес для pg.${DOMAIN_NAME}, но IPv6 не поддерживается. Настройте DNS для использования IPv4.${NC}" | tee -a $LOG_FILE
-    fi
-fi
-
-# 18. Запуск сервисов с исправлением прав
+# 17. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..." | tee -a $LOG_FILE
 cd /root
 # Остановка всех контейнеров
 docker stop $(docker ps -q) 2>/dev/null || true
+# Удаление всех контейнеров
+docker rm -f $(docker ps -a -q) 2>/dev/null || true
 # Повторное исправление прав
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n >> $LOG_FILE 2>&1
 # Запуск
 docker-compose up -d >> $LOG_FILE 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при запуске контейнеров${NC}" | tee -a $LOG_FILE
+    echo "Проверяем статус контейнеров:" | tee -a $LOG_FILE
+    docker ps -a >> $LOG_FILE
+    echo "Логи проблемных контейнеров:" | tee -a $LOG_FILE
+    for container in traefik n8n postgres pgadmin redis qdrant; do
+        docker logs root_${container}_1 2>&1 | grep -i error >> $LOG_FILE
+    done
     exit 1
 fi
 
-# 19. Проверка статуса контейнеров
+# 18. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..." | tee -a $LOG_FILE
 docker ps -a | tee -a $LOG_FILE
-echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>" | tee -a $LOG_FILE
+if ! docker ps | grep -q "root_"; then
+    echo -e "${RED}Контейнеры не запустились, проверьте логи в $LOG_FILE${NC}" | tee -a $LOG_FILE
+    exit 1
+fi
 
-# 20. Проверка доступности n8n
+# 19. Проверка доступности n8n
 echo "Проверяем доступность n8n..." | tee -a $LOG_FILE
 sleep 10 # Даем время на запуск
 curl -s -f http://127.0.0.1:5678 > /dev/null
@@ -358,7 +365,7 @@ else
     exit 1
 fi
 
-# 21. Проверка подключения к PostgreSQL
+# 20. Проверка подключения к PostgreSQL
 echo "Проверяем подключение к PostgreSQL..." | tee -a $LOG_FILE
 docker exec -it root_postgres_1 psql -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null
 if [ $? -eq 0 ]; then
@@ -370,30 +377,31 @@ else
     exit 1
 fi
 
-# 22. Проверка внешнего подключения к PostgreSQL
-echo "Проверяем внешнее подключение к pg.${DOMAIN_NAME}:5432..." | tee -a $LOG_FILE
-timeout 5 bash -c "echo > /dev/tcp/pg.${DOMAIN_NAME}/5432" 2>/dev/null
+# 21. Проверка локального подключения к PostgreSQL
+echo "Проверяем локальное подключение к PostgreSQL (127.0.0.1:5432)..." | tee -a $LOG_FILE
+timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/5432" 2>/dev/null
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}Порт 5432 для pg.${DOMAIN_NAME} доступен${NC}" | tee -a $LOG_FILE
+    echo -e "${GREEN}Порт 5432 доступен на 127.0.0.1${NC}" | tee -a $LOG_FILE
 else
-    echo -e "${RED}Ошибка: порт 5432 для pg.${DOMAIN_NAME} недоступен. Проверьте DNS, файрвол или Traefik${NC}" | tee -a $LOG_FILE
+    echo -e "${RED}Ошибка: порт 5432 недоступен на 127.0.0.1${NC}" | tee -a $LOG_FILE
+    docker logs root_postgres_1 | grep -i error | tee -a $LOG_FILE
 fi
 
-# 23. Проверка логов Traefik
+# 22. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..." | tee -a $LOG_FILE
 docker logs root_traefik_1 | grep -i error | tee -a $LOG_FILE
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте $LOG_FILE${NC}" | tee -a $LOG_FILE
 fi
 
-# 24. Проверка логов PostgreSQL
+# 23. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..." | tee -a $LOG_FILE
 docker logs root_postgres_1 | grep -i error | tee -a $LOG_FILE
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте $LOG_FILE${NC}" | tee -a $LOG_FILE
 fi
 
-# 25. Создание скрипта бэкапа
+# 24. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..." | tee -a $LOG_FILE
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -535,7 +543,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 26. Создание скрипта обновления с бэкапом
+# 25. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..." | tee -a $LOG_FILE
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -600,20 +608,20 @@ else
 fi
 EOF
 
-# 27. Настройка прав и cron
+# 26. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..." | tee -a $LOG_FILE
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
 (crontab -l 2>/dev/null; echo "0 23 * * 6 /root/backup-n8n.sh") | crontab -
 (crontab -l 2>/dev/null; echo "0 0 * * 0 /root/update-n8n.sh") | crontab -
 
-# 28. Открытие порта 5432 в файрволе
+# 27. Открытие порта 5432 в файрволе
 echo "Открываем порт 5432 в файрволе..." | tee -a $LOG_FILE
 ufw allow 5432/tcp > /dev/null 2>&1 || echo "ufw не установлен, пропускаем" | tee -a $LOG_FILE
 
 echo -e "${GREEN}Установка n8n, PostgreSQL, pgAdmin, Redis и Qdrant завершена!${NC}" | tee -a $LOG_FILE
 echo "Доступ к n8n: https://$SUBDOMAIN.$DOMAIN_NAME" | tee -a $LOG_FILE
-echo "Доступ к PostgreSQL: pg.$DOMAIN_NAME:5432 (используйте psql или клиент PostgreSQL)" | tee -a $LOG_FILE
+echo "Доступ к PostgreSQL: 127.0.0.1:5432 (используйте psql или клиент PostgreSQL)" | tee -a $LOG_FILE
 echo "Доступ к pgAdmin: https://pgadmin.$DOMAIN_NAME" | tee -a $LOG_FILE
 echo "Доступ к Qdrant: https://qdrant.$DOMAIN_NAME" | tee -a $LOG_FILE
 echo "Логин n8n: $N8N_BASIC_AUTH_USER" | tee -a $LOG_FILE
@@ -625,8 +633,8 @@ echo "Логи установки: $LOG_FILE" | tee -a $LOG_FILE
 echo "Бэкапы настроены на каждую субботу в 23:00, отправка в Telegram (Chat ID: $TELEGRAM_CHAT_ID)" | tee -a $LOG_FILE
 echo "Автообновление настроено на каждое воскресенье в 00:00, с удалением старых контейнеров n8n" | tee -a $LOG_FILE
 echo "Уведомления и бэкапы отправляются в Telegram (Chat ID: $TELEGRAM_CHAT_ID)" | tee -a $LOG_FILE
-echo -e "${GREEN}Для подключения к PostgreSQL используйте: psql -h pg.$DOMAIN_NAME -U $POSTGRES_USER -d n8n${NC}" | tee -a $LOG_FILE
-echo -e "${GREEN}В pgAdmin сервер уже настроен (Name: n8n, Host: pg.$DOMAIN_NAME, Username: $POSTGRES_USER, Database: n8n)${NC}" | tee -a $LOG_FILE
+echo -e "${GREEN}Для подключения к PostgreSQL используйте: psql -h 127.0.0.1 -U $POSTGRES_USER -d n8n${NC}" | tee -a $LOG_FILE
+echo -e "${GREEN}В pgAdmin сервер уже настроен (Name: n8n, Host: postgres, Username: $POSTGRES_USER, Database: n8n)${NC}" | tee -a $LOG_FILE
 echo -e "${GREEN}Бэкапы хранятся в Telegram, скачивайте их из чата (Chat ID: $TELEGRAM_CHAT_ID)${NC}" | tee -a $LOG_FILE
 echo -e "${GREEN}Если возникает 404/Bad Gateway, проверьте логи: docker logs root_n8n_1, docker logs root_traefik_1, $LOG_FILE${NC}" | tee -a $LOG_FILE
 echo -e "${GREEN}Если ошибка подключения к PostgreSQL, проверьте: docker logs root_postgres_1, $LOG_FILE${NC}" | tee -a $LOG_FILE
