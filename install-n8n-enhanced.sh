@@ -169,8 +169,8 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
       interval: 5s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 12
     networks:
       - n8n-network
 
@@ -214,8 +214,8 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 12
     networks:
       - n8n-network
 
@@ -303,22 +303,7 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
 
-# 17. Проверка подключения к PostgreSQL и Redis
-echo "Проверяем возможность подключения к PostgreSQL и Redis..."
-# Создаем временный контейнер для проверки PostgreSQL
-docker run --rm -it --network n8n-network --entrypoint psql postgres:16 -h postgres -U ${POSTGRES_USER} -d n8n
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка подключения к PostgreSQL. Проверьте настройки postgres${NC}"
-    exit 1
-fi
-# Проверка Redis
-docker run --rm -it --network n8n-network redis:7 redis-cli -h redis -a ${REDIS_PASSWORD} ping
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка подключения к Redis. Проверьте настройки redis${NC}"
-    exit 1
-fi
-
-# 18. Запуск сервисов с исправлением прав
+# 17. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..."
 cd /root
 # Остановка всех контейнеров
@@ -339,12 +324,40 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 19. Проверка статуса контейнеров
+# 18. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 docker ps -a
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 20. Проверка доступности n8n
+# 19. Проверка подключения к PostgreSQL
+echo "Проверяем подключение к PostgreSQL из контейнера n8n..."
+docker exec root_n8n_1 psql -h postgres -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Ошибка подключения к PostgreSQL из n8n${NC}"
+    echo "Логи PostgreSQL:"
+    docker logs root_postgres_1
+    echo "Логи n8n:"
+    docker logs root_n8n_1
+    exit 1
+else
+    echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
+fi
+
+# 20. Проверка подключения к Redis
+echo "Проверяем подключение к Redis из контейнера n8n..."
+docker exec root_n8n_1 redis-cli -h redis -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Ошибка подключения к Redis из n8n${NC}"
+    echo "Логи Redis:"
+    docker logs root_redis_1
+    echo "Логи n8n:"
+    docker logs root_n8n_1
+    exit 1
+else
+    echo -e "${GREEN}Подключение к Redis успешно${NC}"
+fi
+
+# 21. Проверка доступности n8n
 echo "Проверяем доступность n8n..."
 sleep 15 # Даем больше времени на запуск
 curl -s -f http://127.0.0.1:5678/healthz > /dev/null
@@ -361,28 +374,28 @@ else
     exit 1
 fi
 
-# 21. Проверка логов Traefik
+# 22. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..."
 docker logs root_traefik_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
 fi
 
-# 22. Проверка логов PostgreSQL
+# 23. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..."
 docker logs root_postgres_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте выше${NC}"
 fi
 
-# 23. Проверка логов Redis
+# 24. Проверка логов Redis
 echo "Проверяем логи Redis для диагностики..."
 docker logs root_redis_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Redis, проверьте выше${NC}"
 fi
 
-# 24. Создание скрипта бэкапа
+# 25. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -499,7 +512,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 25. Создание скрипта обновления с бэкапом
+# 26. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -561,7 +574,7 @@ else
 fi
 EOF
 
-# 26. Настройка прав и cron
+# 27. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
