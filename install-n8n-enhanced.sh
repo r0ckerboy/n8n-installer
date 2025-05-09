@@ -54,7 +54,15 @@ chmod -R 777 /root/n8n/local-files # Разрешаем чтение/запис�
 chmod -R 700 /root/n8n/backups # Ограничиваем доступ к бэкапам
 chmod -R 777 /root/n8n/pgadmin # Разрешаем доступ для pgAdmin
 
-# 9. Исправление прав доступа для n8n заранее
+# 9. Очистка директории PostgreSQL
+echo "Очищаем директорию /root/n8n/postgres для новой инициализации..."
+rm -rf /root/n8n/postgres/*
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Ошибка при очистке директории /root/n8n/postgres${NC}"
+    exit 1
+fi
+
+# 10. Исправление прав доступа для n8n заранее
 echo "Исправляем права доступа для /root/n8n/.n8n..."
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
 if [ $? -ne 0 ]; then
@@ -65,7 +73,7 @@ fi
 ls -ld /root/n8n/.n8n
 echo "Права для /root/n8n/.n8n установлены"
 
-# 10. Создание docker-compose.yml с PostgreSQL, pgAdmin, Redis
+# 11. Создание docker-compose.yml с PostgreSQL, pgAdmin, Redis
 echo "Создаем docker-compose.yml..."
 cat > /root/docker-compose.yml << 'EOF'
 services:
@@ -145,6 +153,7 @@ services:
     volumes:
       - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
       - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
+      - /root/n8n/postgres/postgresql.conf:/docker-entrypoint-initdb.d/postgresql.conf
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
       interval: 10s
@@ -192,16 +201,24 @@ services:
       retries: 3
 EOF
 
-# 11. Создание pg_hba.conf для PostgreSQL
+# 12. Создание pg_hba.conf для PostgreSQL
 echo "Создаем pg_hba.conf для разрешения локальных подключений..."
 cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
 # Разрешаем локальные подключения
 local all all md5
 host all all 127.0.0.1/32 md5
 host all all ::1/128 md5
+# Разрешаем подключения из Docker-сети
+host all all 0.0.0.0/0 md5
 EOF
 
-# 12. Запрос пользовательских данных
+# 13. Создание postgresql.conf для PostgreSQL
+echo "Создаем postgresql.conf для разрешения подключений..."
+cat > /root/n8n/postgres/postgresql.conf << 'EOF'
+listen_addresses = '*'
+EOF
+
+# 14. Запрос пользовательских данных
 echo "Настройка параметров установки..."
 read -p "Введите ваш домен (например, example.com): " DOMAIN_NAME
 read -p "Введите поддомен для n8n (по умолчанию: n8n): " SUBDOMAIN
@@ -217,11 +234,11 @@ read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
 read -p "Введите пароль Redis: " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
-read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
+read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENER  GENERIC_TIMEZONE
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
 read -p "Введите Telegram Chat ID: " TELEGRAM_CHAT_ID
 
-# 13. Создание .env файла
+# 15. Создание .env файла
 echo "Создаем .env файл..."
 cat > /root/.env << EOF
 DATA_FOLDER=/root/n8n/
@@ -232,7 +249,7 @@ N8N_BASIC_AUTH_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
 POSTGRES_USER=$POSTGRES_USER
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 PGADMIN_EMAIL=$PGADMIN_EMAIL
-PGADMIN_PASSWORD=$PGADMIN_PASSWORD
+PGADMIN_DEFAULT_PASSWORD=$PGADMIN_PASSWORD
 REDIS_PASSWORD=$REDIS_PASSWORD
 SSL_EMAIL=$SSL_EMAIL
 GENERIC_TIMEZONE=$GENERIC_TIMEZONE
@@ -240,12 +257,12 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
 
-# 14. Проверка портов
+# 16. Проверка портов
 echo "Проверяем доступность портов 443 и 5678..."
 netstat -tuln | grep -E '443|5678' && echo -e "${RED}Порты 443 или 5678 заняты, проверьте и освободите их${NC}" && exit 1
 echo "Порты свободны"
 
-# 15. Запуск сервисов с исправлением прав
+# 17. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..."
 cd /root
 # Остановка всех контейнеров
@@ -256,15 +273,17 @@ docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint c
 docker-compose up -d
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при запуске контейнеров${NC}"
+    echo "Логи PostgreSQL для диагностики:"
+    docker logs root_postgres_1
     exit 1
 fi
 
-# 16. Проверка статуса контейнеров
+# 18. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 docker ps -a
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 17. Проверка доступности n8n
+# 19. Проверка доступности n8n
 echo "Проверяем доступность n8n..."
 sleep 10 # Даем время на запуск
 curl -s -f http://127.0.0.1:5678 > /dev/null
@@ -277,21 +296,21 @@ else
     exit 1
 fi
 
-# 18. Проверка логов Traefik
+# 20. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..."
 docker logs root_traefik_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
 fi
 
-# 19. Проверка логов PostgreSQL Stuart Little
+# 21. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..."
 docker logs root_postgres_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте выше${NC}"
 fi
 
-# 20. Создание скрипта бэкапа
+# 22. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -337,13 +356,13 @@ delete_old_telegram_messages() {
             timestamp_secs=$(date -d "$timestamp" +%s)
             four_weeks_ago=$(date -d "28 days ago" +%s)
             if [ $timestamp_secs -lt $four_weeks_ago ]; then
-                echo "$message_id"
+                echo "$ nume_id"
             fi
         done)
         # Обновляем файл, удаляя старые записи
         if [ -s "$backup_file" ]; then
             grep -v -f <(cat "$backup_file" | while read timestamp message_id; do
-                timestamp_secs=$( HAMLET -d "$timestamp" +%s)
+                timestamp_secs=$(date -d "$timestamp" +%s)
                 four_weeks_ago=$(date -d "28 days ago" +%s)
                 if [ $timestamp_secs -lt $four_weeks_ago ]; then
                     echo "^$timestamp $message_id$"
@@ -408,7 +427,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 21. Создание скрипта обновления с бэкапом
+# 23. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -421,7 +440,9 @@ NC='\033[0m' # No Color
 # Загрузка переменных из .env
 source /root/.env
 
-TELEGRAM_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_API="https://api
+
+telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
 
 # Функция отправки уведомлений в Telegram
 send_telegram() {
@@ -469,7 +490,7 @@ else
 fi
 EOF
 
-# 22. Настройка прав и cron
+# 24. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
