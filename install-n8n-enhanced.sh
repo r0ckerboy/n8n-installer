@@ -55,7 +55,11 @@ chmod -R 700 /root/n8n/backups
 chmod -R 777 /root/n8n/pgadmin
 chown -R 1000:1000 /root/n8n/.n8n
 
-# 9. Создание docker-compose.yml
+# 9. Очистка существующего тома PostgreSQL
+echo "Очищаем существующий том PostgreSQL..."
+rm -rf /root/n8n/postgres/*
+
+# 10. Создание docker-compose.yml
 echo "Создаем docker-compose.yml..."
 cat > /root/docker-compose.yml << 'EOF'
 services:
@@ -137,7 +141,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=n8n
     volumes:
-      - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
       - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
     labels:
       - traefik.enable=true
@@ -196,12 +200,15 @@ services:
     networks:
       - n8n_network
 
+volumes:
+  postgres_data:
+
 networks:
   n8n_network:
     name: n8n_network
 EOF
 
-# 10. Создание pg_hba.conf для PostgreSQL
+# 11. Создание pg_hba.conf для PostgreSQL
 echo "Создаем pg_hba.conf для разрешения внешних подключений..."
 cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
 # Разрешаем подключения от всех IP
@@ -210,7 +217,7 @@ host all all 0.0.0.0/0 md5
 local all all md5
 EOF
 
-# 11. Запрос пользовательских данных
+# 12. Запрос пользовательских данных
 echo "Настройка параметров установки..."
 read -p "Введите ваш домен (например, example.com): " DOMAIN_NAME
 read -p "Введите поддомен для n8n (по умолчанию: n8n): " SUBDOMAIN
@@ -230,7 +237,7 @@ read -p "Введите ваш часовой пояс (например, Europe
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
 read -p "Введите Telegram Chat ID: " TELEGRAM_CHAT_ID
 
-# 12. Создание .env файла
+# 13. Создание .env файла
 echo "Создаем .env файл..."
 cat > /root/.env << EOF
 DATA_FOLDER=/root/n8n/
@@ -249,21 +256,25 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
 
-# 13. Запуск сервисов
+# 14. Запуск сервисов
 echo "Запускаем сервисы..."
 cd /root
 docker-compose up -d
 
-# 14. Проверка статуса контейнеров
+# 15. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 docker ps
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 15. Проверка логов PostgreSQL
-echo "Проверяем логи PostgreSQL для диагностики..."
+# 16. Проверка логов всех сервисов
+echo "Проверяем логи сервисов для диагностики..."
 docker logs postgres
+docker logs redis
+docker logs n8n
+docker logs pgadmin
+docker logs traefik
 
-# 16. Создание скрипта бэкапа
+# 17. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -377,7 +388,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 17. Создание скрипта обновления с бэкапом
+# 18. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -433,7 +444,7 @@ else
 fi
 EOF
 
-# 18. Настройка прав и cron
+# 19. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
