@@ -86,6 +86,17 @@ install_docker() {
     apt update
     apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     check_error "Не удалось установить Docker"
+
+    # Устанавливаем Docker Compose отдельно
+    log "Устанавливаем Docker Compose..."
+    COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
+    check_error "Не удалось установить Docker Compose"
+    
+    # Создаем симлинк для совместимости
+    ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+    check_error "Не удалось создать симлинк для docker-compose"
 }
 
 # Настройка окружения
