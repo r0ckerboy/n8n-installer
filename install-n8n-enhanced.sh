@@ -22,49 +22,55 @@ check_error() {
 
 # Запрос данных у пользователя
 get_user_input() {
-    read -p "Введите ваш домен (например, example.com): " DOMAIN_NAME
-    read -p "Введите поддомен для n8n (по умолчанию n8n): " SUBDOMAIN
+    echo -e "${YELLOW}Введите параметры для установки:${NC}"
+    read -p "Домен (например, example.com): " DOMAIN_NAME
+    read -p "Поддомен для n8n (по умолчанию n8n): " SUBDOMAIN
     SUBDOMAIN=${SUBDOMAIN:-n8n}
-    read -p "Введите логин для n8n: " N8N_BASIC_AUTH_USER
-    read -s -p "Введите пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
+    read -p "Логин для n8n: " N8N_BASIC_AUTH_USER
+    read -s -p "Пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
     echo
-    read -p "Введите ваш email для SSL: " SSL_EMAIL
-    read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
+    read -p "Email для SSL: " SSL_EMAIL
+    read -p "Часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
 
     # Параметры PostgreSQL
-    read -p "Введите имя пользователя PostgreSQL (по умолчанию n8n): " DB_USER
+    echo -e "\n${YELLOW}Настройки PostgreSQL:${NC}"
+    read -p "Пользователь PostgreSQL (по умолчанию n8n): " DB_USER
     DB_USER=${DB_USER:-n8n}
-    read -s -p "Введите пароль PostgreSQL: " DB_PASSWORD
+    read -s -p "Пароль PostgreSQL: " DB_PASSWORD
     echo
-    read -p "Введите имя базы данных PostgreSQL (по умолчанию n8n): " DB_NAME
+    read -p "Имя базы данных (по умолчанию n8n): " DB_NAME
     DB_NAME=${DB_NAME:-n8n}
 
     # Параметры Redis
-    read -s -p "Введите пароль для Redis: " REDIS_PASSWORD
+    echo -e "\n${YELLOW}Настройки Redis:${NC}"
+    read -s -p "Пароль Redis: " REDIS_PASSWORD
     echo
 
     # Параметры pgAdmin
-    read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
-    read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
+    echo -e "\n${YELLOW}Настройки pgAdmin:${NC}"
+    read -p "Email для pgAdmin: " PGADMIN_EMAIL
+    read -s -p "Пароль для pgAdmin: " PGADMIN_PASSWORD
     echo
 
     # Параметры Telegram для бэкапов
-    read -p "Введите токен Telegram бота: " TELEGRAM_BOT_TOKEN
-    read -p "Введите ID чата Telegram для уведомлений: " TELEGRAM_CHAT_ID
+    echo -e "\n${YELLOW}Настройки Telegram для бэкапов:${NC}"
+    read -p "Токен Telegram бота: " TELEGRAM_BOT_TOKEN
+    read -p "ID чата Telegram: " TELEGRAM_CHAT_ID
 }
 
 # Установка зависимостей
 install_dependencies() {
-    log "Обновляем индексы пакетов..."
-    apt update
-    check_error "Не удалось обновить индексы пакетов"
+    log "Обновляем пакеты..."
+    apt update && apt upgrade -y
+    check_error "Ошибка обновления пакетов"
 
     log "Устанавливаем необходимые пакеты..."
-    apt install -y curl software-properties-common ca-certificates apt-transport-https git jq
-    check_error "Не удалось установить дополнительные пакеты"
+    apt install -y curl software-properties-common ca-certificates \
+                  apt-transport-https git jq net-tools
+    check_error "Ошибка установки пакетов"
 }
 
-# Установка Docker
+# Установка Docker и Docker Compose
 install_docker() {
     log "Устанавливаем Docker..."
     # Удаляем старые версии
@@ -76,27 +82,29 @@ install_docker() {
     # Добавляем GPG ключ Docker
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    check_error "Не удалось добавить GPG ключ Docker"
+    check_error "Ошибка добавления GPG ключа Docker"
 
     # Добавляем репозиторий Docker
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    check_error "Не удалось добавить репозиторий Docker"
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+        tee /etc/apt/sources.list.d/docker.list > /dev/null
+    check_error "Ошибка добавления репозитория Docker"
 
     # Устанавливаем Docker
     apt update
     apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    check_error "Не удалось установить Docker"
+    check_error "Ошибка установки Docker"
 
-    # Устанавливаем Docker Compose отдельно
+    # Устанавливаем Docker Compose
     log "Устанавливаем Docker Compose..."
     COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
-    check_error "Не удалось установить Docker Compose"
-    
-    # Создаем симлинк для совместимости
     ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-    check_error "Не удалось создать симлинк для docker-compose"
+    check_error "Ошибка установки Docker Compose"
+
+    # Проверяем установку
+    docker --version
+    docker-compose --version
 }
 
 # Настройка окружения
@@ -104,11 +112,21 @@ setup_environment() {
     log "Создаем необходимые директории..."
     mkdir -p /root/n8n/{.n8n,local-files,postgres-data,redis-data,backups,initdb}
     chmod -R 777 /root/n8n/local-files
-    check_error "Не удалось создать директории"
-
+    
+    # Очищаем предыдущие данные PostgreSQL (если есть)
+    rm -rf /root/n8n/postgres-data/*
+    
     # Создаем скрипт инициализации PostgreSQL
-    echo "CREATE DATABASE ${DB_NAME};" > /root/n8n/initdb/init.sql
+    cat > /root/n8n/initdb/init.sql << EOF
+CREATE DATABASE ${DB_NAME};
+CREATE USER ${DB_USER} WITH ENCRYPTED PASSWORD '${DB_PASSWORD}';
+ALTER DATABASE ${DB_NAME} OWNER TO ${DB_USER};
+GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
+EOF
+    
+    # Устанавливаем правильные права
     chown -R 999:999 /root/n8n/postgres-data
+    chmod -R 750 /root/n8n/postgres-data
 }
 
 # Создание docker-compose.yml
@@ -137,25 +155,26 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   postgres:
-    image: postgres:14
+    image: postgres:14-alpine
     restart: always
     environment:
-      POSTGRES_USER: \${DB_USER}
-      POSTGRES_PASSWORD: \${DB_PASSWORD}
-      POSTGRES_DB: \${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - \${DATA_FOLDER}/postgres-data:/var/lib/postgresql/data
       - \${DATA_FOLDER}/initdb:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \${DB_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 20
 
   redis:
-    image: redis:6
+    image: redis:6-alpine
     restart: always
-    command: redis-server --requirepass \${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD}
     volumes:
       - \${DATA_FOLDER}/redis-data:/data
     healthcheck:
@@ -168,8 +187,8 @@ services:
     image: dpage/pgadmin4
     restart: always
     environment:
-      PGADMIN_DEFAULT_EMAIL: \${PGADMIN_EMAIL}
-      PGADMIN_DEFAULT_PASSWORD: \${PGADMIN_PASSWORD}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
     labels:
       - traefik.enable=true
       - traefik.http.routers.pgadmin.rule=Host(\`pgadmin.\${DOMAIN_NAME}\`)
@@ -232,33 +251,75 @@ create_env_file() {
     log "Создаем .env файл..."
     cat > /root/.env << EOF
 DATA_FOLDER=/root/n8n/
-DOMAIN_NAME=$DOMAIN_NAME
-SUBDOMAIN=$SUBDOMAIN
-N8N_BASIC_AUTH_USER=$N8N_BASIC_AUTH_USER
-N8N_BASIC_AUTH_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
-SSL_EMAIL=$SSL_EMAIL
-GENERIC_TIMEZONE=$GENERIC_TIMEZONE
-DB_USER=$DB_USER
-DB_PASSWORD=$DB_PASSWORD
-DB_NAME=$DB_NAME
-REDIS_PASSWORD=$REDIS_PASSWORD
-PGADMIN_EMAIL=$PGADMIN_EMAIL
-PGADMIN_PASSWORD=$PGADMIN_PASSWORD
+DOMAIN_NAME=${DOMAIN_NAME}
+SUBDOMAIN=${SUBDOMAIN}
+N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+SSL_EMAIL=${SSL_EMAIL}
+GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_NAME=${DB_NAME}
+REDIS_PASSWORD=${REDIS_PASSWORD}
+PGADMIN_EMAIL=${PGADMIN_EMAIL}
+PGADMIN_PASSWORD=${PGADMIN_PASSWORD}
 EOF
+}
+
+# Проверка состояния PostgreSQL
+check_postgres() {
+    log "Проверяем состояние PostgreSQL..."
+    local timeout=120
+    local start_time=$(date +%s)
+    
+    while ! docker exec root-postgres-1 pg_isready -U ${DB_USER} -d ${DB_NAME} >/dev/null 2>&1; do
+        if [ $(($(date +%s) - start_time)) -gt $timeout ]; then
+            log "Таймаут ожидания PostgreSQL"
+            docker logs root-postgres-1
+            return 1
+        fi
+        sleep 5
+        log "Ожидаем запуска PostgreSQL..."
+    done
+    
+    log "PostgreSQL готов к работе"
+    return 0
 }
 
 # Запуск сервисов
 start_services() {
     log "Запускаем сервисы..."
     cd /root
+    
+    # Временный запуск без healthcheck для инициализации PostgreSQL
+    sed -i '/condition: service_healthy/d' docker-compose.yml
+    docker-compose up -d postgres
+    
+    # Ждем инициализации PostgreSQL
+    check_postgres || {
+        log "Проблемы с PostgreSQL, пытаемся восстановить..."
+        docker-compose stop postgres
+        docker-compose rm -f postgres
+        rm -rf /root/n8n/postgres-data/*
+        docker-compose up -d postgres
+        check_postgres || {
+            echo -e "${RED}Не удалось запустить PostgreSQL${NC}"
+            exit 1
+        }
+    }
+    
+    # Полный запуск всех сервисов
     docker-compose up -d
-    check_error "Не удалось запустить сервисы"
-
+    
     # Исправляем права доступа для n8n
     log "Исправляем права доступа..."
     docker-compose stop n8n
     docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/n8n -R node:node /home/node/.n8n
     docker-compose up -d
+    
+    # Включаем аутентификацию PostgreSQL
+    docker exec root-postgres-1 psql -U ${DB_USER} -d ${DB_NAME} -c "ALTER SYSTEM SET host_auth_method TO 'md5';"
+    docker-compose restart postgres
 }
 
 # Настройка автообновления
@@ -375,37 +436,32 @@ EOF
     (crontab -l 2>/dev/null; echo "0 23 * * 6 /root/n8n-backup.sh >> /root/n8n-backup.log 2>&1") | crontab -
 }
 
-# Завершение установки
+# Вывод информации после установки
 show_summary() {
     echo -e "${GREEN}\nУстановка завершена успешно!${NC}"
     echo -e "${YELLOW}Доступ к сервисам:${NC}"
-    echo -e "n8n: ${GREEN}https://$SUBDOMAIN.$DOMAIN_NAME${NC}"
-    echo -e "pgAdmin: ${GREEN}https://pgadmin.$DOMAIN_NAME${NC}"
-    echo -e "Логин pgAdmin: ${YELLOW}$PGADMIN_EMAIL${NC}"
+    echo -e "n8n: ${GREEN}https://${SUBDOMAIN}.${DOMAIN_NAME}${NC}"
+    echo -e "pgAdmin: ${GREEN}https://pgadmin.${DOMAIN_NAME}${NC}"
+    echo -e "Логин pgAdmin: ${YELLOW}${PGADMIN_EMAIL}${NC}"
     echo -e "Пароль pgAdmin: [скрыт]"
-    echo -e "\n${YELLOW}Данные для подключения к PostgreSQL:${NC}"
+    echo -e "\n${YELLOW}Данные PostgreSQL:${NC}"
     echo -e "Хост: ${GREEN}postgres${NC}"
-    echo -e "База данных: ${GREEN}$DB_NAME${NC}"
-    echo -e "Пользователь: ${GREEN}$DB_USER${NC}"
+    echo -e "База: ${GREEN}${DB_NAME}${NC}"
+    echo -e "Пользователь: ${GREEN}${DB_USER}${NC}"
     echo -e "Пароль: [скрыт]"
-    echo -e "\n${YELLOW}Папки:${NC}"
-    echo -e "Данные n8n: ${GREEN}/root/n8n/.n8n${NC}"
-    echo -e "Файлы: ${GREEN}/root/n8n/local-files${NC}"
-    echo -e "Данные PostgreSQL: ${GREEN}/root/n8n/postgres-data${NC}"
-    echo -e "Данные Redis: ${GREEN}/root/n8n/redis-data${NC}"
-    echo -e "Бэкапы: ${GREEN}/root/n8n/backups${NC}"
     echo -e "\n${YELLOW}Автоматизация:${NC}"
     echo -e "Обновление: каждое воскресенье в 00:00"
-    echo -e "Бэкапы: каждую субботу в 23:00 с отправкой в Telegram"
+    echo -e "Бэкапы: каждую субботу в 23:00 (Telegram уведомления)"
+    echo -e "\n${GREEN}Готово!${NC}"
 }
 
 # Главная функция
 main() {
-    echo -e "${GREEN}Начинаем установку n8n с PostgreSQL, Redis и pgAdmin...${NC}"
-
+    echo -e "${GREEN}=== Установка n8n с PostgreSQL, Redis и pgAdmin ===${NC}"
+    
     # Проверка прав root
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}Пожалуйста, запустите скрипт с правами root (sudo)${NC}"
+        echo -e "${RED}Запустите скрипт с правами root: sudo ./install-n8n.sh${NC}"
         exit 1
     fi
 
