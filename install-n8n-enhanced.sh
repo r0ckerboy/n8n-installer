@@ -19,7 +19,7 @@ apt update
 
 # 2. Установка необходимых пакетов
 echo "Устанавливаем необходимые пакеты..."
-apt install curl software-properties-common ca-certificates -y
+apt install curl software-properties-common ca-certificates net-tools lsof -y
 
 # 3. Импорт GPG-ключа Docker
 echo "Импортируем GPG-ключ Docker..."
@@ -218,7 +218,29 @@ cat > /root/n8n/postgres/postgresql.conf << 'EOF'
 listen_addresses = '*'
 EOF
 
-# 14. Запрос пользовательских данных
+# 14. Проверка портов
+echo "Проверяем доступность портов 443 и 5678..."
+if netstat -tuln | grep -E '443|5678'; then
+    echo -e "${RED}Порты 443 или 5678 заняты!${NC}"
+    echo "Детали занятых портов:"
+    lsof -i :443
+    lsof -i :5678
+    echo -e "${RED}Для освобождения портов выполните следующие действия:${NC}"
+    echo "1. Найдите PID процессов, использующих порты, с помощью 'lsof -i :443' и 'lsof -i :5678'."
+    echo "2. Завершите процессы командой 'kill -9 <PID>'."
+    echo "3. Если порты используются веб-сервером (например, nginx, apache), остановите его:"
+    echo "   systemctl stop nginx"
+    echo "   systemctl stop apache2"
+    echo "4. Если порты используются Docker-контейнерами, остановите их:"
+    echo "   docker ps -a"
+    echo "   docker stop <container_name>"
+    echo "5. Повторно запустите скрипт после освобождения портов."
+    exit 1
+else
+    echo "Порты свободны"
+fi
+
+# 15. Запрос пользовательских данных
 echo "Настройка параметров установки..."
 read -p "Введите ваш домен (например, example.com): " DOMAIN_NAME
 read -p "Введите поддомен для n8n (по умолчанию: n8n): " SUBDOMAIN
@@ -234,11 +256,11 @@ read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
 read -p "Введите пароль Redis: " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
-read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENER  GENERIC_TIMEZONE
+read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
 read -p "Введите Telegram Chat ID: " TELEGRAM_CHAT_ID
 
-# 15. Создание .env файла
+# 16. Создание .env файла
 echo "Создаем .env файл..."
 cat > /root/.env << EOF
 DATA_FOLDER=/root/n8n/
@@ -256,11 +278,6 @@ GENERIC_TIMEZONE=$GENERIC_TIMEZONE
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
-
-# 16. Проверка портов
-echo "Проверяем доступность портов 443 и 5678..."
-netstat -tuln | grep -E '443|5678' && echo -e "${RED}Порты 443 или 5678 заняты, проверьте и освободите их${NC}" && exit 1
-echo "Порты свободны"
 
 # 17. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..."
@@ -356,7 +373,7 @@ delete_old_telegram_messages() {
             timestamp_secs=$(date -d "$timestamp" +%s)
             four_weeks_ago=$(date -d "28 days ago" +%s)
             if [ $timestamp_secs -lt $four_weeks_ago ]; then
-                echo "$ nume_id"
+                echo "$message_id"
             fi
         done)
         # Обновляем файл, удаляя старые записи
@@ -372,7 +389,7 @@ delete_old_telegram_messages() {
     fi
 }
 
-echo -e "${GREEN}Начинаем создание бэкапов...${NC}"
+echo -e "${GREEN}Начинаем создание бэкапа...${NC}"
 send_telegram_message "🟢 Начинаем создание бэкапов для n8n..."
 
 # Бэкап PostgreSQL
@@ -413,7 +430,8 @@ else
     exit 1
 fi
 
-# Удаление старых сообщений в Telegram
+# Удаление старых сообщ
+ений в Telegram
 echo "Удаляем старые бэкапы из Telegram (старше 4 недель)..."
 delete_old_telegram_messages "postgres"
 delete_old_telegram_messages "redis"
@@ -440,9 +458,7 @@ NC='\033[0m' # No Color
 # Загрузка переменных из .env
 source /root/.env
 
-TELEGRAM_API="https://api
-
-telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
 
 # Функция отправки уведомлений в Telegram
 send_telegram() {
