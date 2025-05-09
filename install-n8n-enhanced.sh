@@ -94,19 +94,31 @@ install_docker() {
     apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     check_error "Ошибка установки Docker"
 
-    # Устанавливаем Docker Compose
+    # Установка Docker Compose
+install_docker_compose() {
     log "Устанавливаем Docker Compose..."
+    
+    # Проверяем, установлен ли уже docker-compose
+    if [ -x "$(command -v docker-compose)" ]; then
+        log "Docker Compose уже установлен, пропускаем установку"
+        return 0
+    fi
+
+    # Устанавливаем последнюю версию Docker Compose
     COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
-    ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-    check_error "Ошибка установки Docker Compose"
-
+    
+    # Создаем симлинк только если он не существует
+    if [ ! -f /usr/bin/docker-compose ]; then
+        ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+    fi
+    
     # Проверяем установку
-    docker --version
     docker-compose --version
+    check_error "Ошибка установки Docker Compose"
 }
-
+    
 # Настройка окружения
 setup_environment() {
     log "Создаем необходимые директории..."
@@ -133,7 +145,7 @@ EOF
 create_docker_compose() {
     log "Создаем docker-compose.yml..."
     cat > /root/docker-compose.yml << EOF
-version: "3.8"
+
 
 services:
   traefik:
