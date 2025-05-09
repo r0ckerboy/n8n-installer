@@ -5,7 +5,7 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}Начинаем установку n8n, PostgreSQL, pgAdmin и Redis...${NC}"
+echo -e "${GREEN}Начинаем установку n8n с SQLite (без PostgreSQL и Redis)...${NC}"
 
 # Проверка прав root
 if [ "$EUID" -ne 0 ]; then
@@ -19,7 +19,7 @@ apt update
 
 # 2. Установка необходимых пакетов
 echo "Устанавливаем необходимые пакеты..."
-apt install curl software-properties-common ca-certificates -y
+apt install curl software-properties-common ca-certificates net-tools lsof -y
 
 # 3. Импорт GPG-ключа Docker
 echo "Импортируем GPG-ключ Docker..."
@@ -46,19 +46,16 @@ chmod +x /usr/local/bin/docker-compose
 echo "Создаем необходимые директории..."
 mkdir -p /root/n8n/.n8n
 mkdir -p /root/n8n/local-files
-mkdir -p /root/n8n/postgres
-mkdir -p /root/n8n/redis
 mkdir -p /root/n8n/backups
 mkdir -p /root/n8n/pgadmin
-mkdir -p /root/n8n/letsencrypt
 chmod -R 777 /root/n8n/local-files # Разрешаем чтение/запись
 chmod -R 700 /root/n8n/backups # Ограничиваем доступ к бэкапам
 chmod -R 777 /root/n8n/pgadmin # Разрешаем доступ для pgAdmin
-chmod -R 777 /root/n8n/postgres # Исправление прав доступа для PostgreSQL
 
 # 9. Исправление прав доступа для n8n заранее
 echo "Исправляем права доступа для /root/n8n/.n8n..."
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
+docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при установке прав доступа для /root/n8n/.n8n${NC}"
     exit 1
@@ -67,9 +64,10 @@ fi
 ls -ld /root/n8n/.n8n
 echo "Права для /root/n8n/.n8n установлены"
 
-# 10. Создание docker-compose.yml с PostgreSQL, pgAdmin, Redis
+# 10. Создание docker-compose.yml с n8n и Traefik
 echo "Создаем docker-compose.yml..."
 cat > /root/docker-compose.yml << 'EOF'
+version: '3.8'
 services:
   traefik:
     image: "traefik"
@@ -94,6 +92,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    networks:
+      - n8n-network
 
   n8n:
     image: n8nio/n8n
@@ -117,42 +117,18 @@ services:
       - NODE_ENV=production
       - WEBHOOK_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}/
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=${POSTGRES_USER}
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_LOG_LEVEL=debug
     volumes:
       - ${DATA_FOLDER}/.n8n:/home/node/.n8n
       - ${DATA_FOLDER}/local-files:/files
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5678"]
       interval: 10s
       timeout: 5s
-      retries: 3
-
-  postgres:
-    image: postgres:16
-    restart: always
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=n8n
-      - PGDATA=/var/lib/postgresql/data
-      - POSTGRES_INITDB_ARGS=--auth-host=md5
-    volumes:
-      - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
-      interval: 10s
-      timeout: 5s
       retries: 5
+    networks:
+      - n8n-network
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -172,38 +148,40 @@ services:
       - traefik.http.routers.pgadmin.tls.certresolver=mytlschallenge
     ports:
       - "127.0.0.1:5050:80"
-    depends_on:
-      - postgres
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80"]
       interval: 10s
       timeout: 5s
       retries: 3
+    networks:
+      - n8n-network
 
-  redis:
-    image: redis:7
-    restart: always
-    volumes:
-      - ${DATA_FOLDER}/redis:/data
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+networks:
+  n8n-network:
+    driver: bridge
 EOF
 
-# 11. Создание pg_hba.conf для PostgreSQL
-echo "Создаем pg_hba.conf для разрешения локальных подключений..."
-cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
-# Разрешаем локальные подключения
-local all all md5
-host all all 127.0.0.1/32 md5
-host all all ::1/128 md5
-host all all 0.0.0.0/0 md5
-EOF
+# 11. Проверка портов
+echo "Проверяем доступность портов 443 и 5678..."
+if netstat -tuln | grep -E '443|5678'; then
+    echo -e "${RED}Порты 443 или 5678 заняты!${NC}"
+    echo "Детали занятых портов:"
+    lsof -i :443
+    lsof -i :5678
+    echo -e "${RED}Для освобождения портов выполните следующие действия:${NC}"
+    echo "1. Найдите PID процессов, использующих порты, с помощью 'lsof -i :443' и 'lsof -i :5678'."
+    echo "2. Завершите процессы командой 'kill -9 <PID>'."
+    echo "3. Если порты используются веб-сервером (например, nginx, apache), остановите его:"
+    echo "   systemctl stop nginx"
+    echo "   systemctl stop apache2"
+    echo "4. Если порты используются Docker-контейнерами, остановите их:"
+    echo "   docker ps -a"
+    echo "   docker stop <container_name>"
+    echo "5. Повторно запустите скрипт после освобождения портов."
+    exit 1
+else
+    echo "Порты свободны"
+fi
 
 # 12. Запрос пользовательских данных
 echo "Настройка параметров установки..."
@@ -213,13 +191,9 @@ SUBDOMAIN=${SUBDOMAIN:-n8n}
 read -p "Введите логин для n8n: " N8N_BASIC_AUTH_USER
 read -s -p "Введите пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
 echo
-read -p "Введите пользователя PostgreSQL: " POSTGRES_USER
-read -s -p "Введите пароль PostgreSQL: " POSTGRES_PASSWORD
-echo
 read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
 read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
-read -p "Введите пароль Redis: " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
 read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
@@ -233,79 +207,59 @@ DOMAIN_NAME=$DOMAIN_NAME
 SUBDOMAIN=$SUBDOMAIN
 N8N_BASIC_AUTH_USER=$N8N_BASIC_AUTH_USER
 N8N_BASIC_AUTH_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
-POSTGRES_USER=$POSTGRES_USER
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 PGADMIN_EMAIL=$PGADMIN_EMAIL
-PGADMIN_PASSWORD=$PGADMIN_PASSWORD
-REDIS_PASSWORD=$REDIS_PASSWORD
+PGADMIN_DEFAULT_PASSWORD=$PGADMIN_PASSWORD
 SSL_EMAIL=$SSL_EMAIL
 GENERIC_TIMEZONE=$GENERIC_TIMEZONE
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
 
-# 14. Проверка портов
-echo "Проверяем доступность портов 443 и 5678..."
-netstat -tuln | grep -E '443|5678' && echo -e "${RED}Порты 443 или 5678 заняты, проверьте и освободите их${NC}" && exit 1
-echo "Порты свободны"
-
-# 15. Остановка существующих контейнеров и очистка
-echo "Останавливаем существующие контейнеры..."
-docker stop $(docker ps -a -q) 2>/dev/null || true
-docker rm $(docker ps -a -q) 2>/dev/null || true
-
-# 16. Очистка и подготовка каталогов
-echo "Очищаем каталог PostgreSQL для чистой установки..."
-rm -rf /root/n8n/postgres/* 2>/dev/null || true
-mkdir -p /root/n8n/postgres
-
-# 17. Исправление прав доступа
-echo "Исправляем права доступа для всех каталогов..."
-chmod -R 777 /root/n8n/postgres
-chmod -R 777 /root/n8n/pgadmin
-chmod -R 777 /root/n8n/redis
-chmod -R 777 /root/n8n/local-files
-chmod -R 777 /root/n8n/letsencrypt
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
-
-# 18. Запуск сервисов
+# 14. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..."
 cd /root
+# Остановка всех контейнеров
+docker stop $(docker ps -q) 2>/dev/null || true
+# Повторное исправление прав
+docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
+docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
+# Запуск
 docker-compose up -d
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при запуске контейнеров${NC}"
-    docker logs root_postgres_1
+    echo "Логи n8n для диагностики:"
+    docker logs root_n8n_1
     exit 1
 fi
 
-# 19. Проверка статуса контейнеров
+# 15. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 docker ps -a
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 20. Добавление конфигурации pg_hba.conf в работающий контейнер
-echo "Настраиваем PostgreSQL для внешних подключений..."
-sleep 10 # Даем время на запуск
-docker cp /root/n8n/postgres/pg_hba.conf root-postgres-1:/var/lib/postgresql/data/pg_hba.conf 2>/dev/null || docker cp /root/n8n/postgres/pg_hba.conf root_postgres_1:/var/lib/postgresql/data/pg_hba.conf 2>/dev/null
-docker exec -it root-postgres-1 chown postgres:postgres /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || docker exec -it root_postgres_1 chown postgres:postgres /var/lib/postgresql/data/pg_hba.conf 2>/dev/null
-docker exec -it root-postgres-1 chmod 600 /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || docker exec -it root_postgres_1 chmod 600 /var/lib/postgresql/data/pg_hba.conf 2>/dev/null
-docker exec -it root-postgres-1 su - postgres -c "pg_ctl reload" 2>/dev/null || docker exec -it root_postgres_1 su - postgres -c "pg_ctl reload" 2>/dev/null
-
-# 21. Проверка доступности n8n
+# 16. Проверка доступности n8n
 echo "Проверяем доступность n8n..."
-sleep 10 # Даем время на запуск
+sleep 15 # Даем время на запуск
 curl -s -f http://127.0.0.1:5678 > /dev/null
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}n8n доступен на http://127.0.0.1:5678${NC}"
 else
     echo -e "${RED}Ошибка: n8n не отвечает на http://127.0.0.1:5678${NC}"
     echo "Логи n8n:"
-    docker logs root-n8n-1 2>/dev/null || docker logs root_n8n_1 2>/dev/null
-    echo "Логи PostgreSQL:"
-    docker logs root-postgres-1 2>/dev/null || docker logs root_postgres_1 2>/dev/null
+    docker logs root_n8n_1
+    echo "Логи Traefik:"
+    docker logs root_traefik_1
+    exit 1
 fi
 
-# 22. Создание скрипта бэкапа
+# 17. Проверка логов Traefik
+echo "Проверяем логи Traefik для диагностики..."
+docker logs root_traefik_1 | grep -i error
+if [ $? -eq 0 ]; then
+    echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
+fi
+
+# 18. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -321,7 +275,6 @@ source /root/.env
 BACKUP_DIR="/root/n8n/backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 TELEGRAM_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-POSTGRES_DB="n8n"
 
 # Функция отправки уведомлений в Telegram
 send_telegram_message() {
@@ -370,61 +323,38 @@ delete_old_telegram_messages() {
 echo -e "${GREEN}Начинаем создание бэкапов...${NC}"
 send_telegram_message "🟢 Начинаем создание бэкапов для n8n..."
 
-# Бэкап PostgreSQL
-echo "Создаем бэкап PostgreSQL..."
-docker exec -e PGPASSWORD=$POSTGRES_PASSWORD root-postgres-1 pg_dump -U $POSTGRES_USER $POSTGRES_DB > $BACKUP_DIR/postgres_$TIMESTAMP.sql 2>/dev/null || \
-docker exec -e PGPASSWORD=$POSTGRES_PASSWORD root_postgres_1 pg_dump -U $POSTGRES_USER $POSTGRES_DB > $BACKUP_DIR/postgres_$TIMESTAMP.sql
+# Бэкап SQLite
+echo "Создаем бэкап SQLite..."
+cp /root/n8n/.n8n/database.sqlite $BACKUP_DIR/n8n_sqlite_$TIMESTAMP.sqlite
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}Бэкап PostgreSQL успешно создан: postgres_$TIMESTAMP.sql${NC}"
-    message_id=$(send_telegram_file "$BACKUP_DIR/postgres_$TIMESTAMP.sql" "PostgreSQL backup: postgres_$TIMESTAMP.sql")
+    echo -e "${GREEN}Бэкап SQLite успешно создан: n8n_sqlite_$TIMESTAMP.sqlite${NC}"
+    message_id=$(send_telegram_file "$BACKUP_DIR/n8n_sqlite_$TIMESTAMP.sqlite" "SQLite backup: n8n_sqlite_$TIMESTAMP.sqlite")
     if [ -n "$message_id" ]; then
-        echo "$(date +%Y-%m-%d) $message_id" >> /root/n8n/backups/postgres_message_ids.txt
-        send_telegram_message "✅ Бэкап PostgreSQL отправлен в Telegram: postgres_$TIMESTAMP.sql"
+        echo "$(date +%Y-%m-%d) $message_id" >> /root/n8n/backups/sqlite_message_ids.txt
+        send_telegram_message "✅ Бэкап SQLite отправлен в Telegram: n8n_sqlite_$TIMESTAMP.sqlite"
     else
-        echo -e "${RED}Ошибка при отправке бэкапа PostgreSQL в Telegram${NC}"
-        send_telegram_message "❌ Ошибка при отправке бэкапа PostgreSQL в Telegram"
+        echo -e "${RED}Ошибка при отправке бэкапа SQLite в Telegram${NC}"
+        send_telegram_message "❌ Ошибка при отправке бэкапа SQLite в Telegram"
     fi
 else
-    echo -e "${RED}Ошибка при создании бэкапа PostgreSQL${NC}"
-    send_telegram_message "❌ Ошибка при создании бэкапа PostgreSQL"
-    exit 1
-fi
-
-# Бэкап Redis
-echo "Создаем бэкап Redis..."
-docker cp root-redis-1:/data/dump.rdb $BACKUP_DIR/redis_$TIMESTAMP.rdb 2>/dev/null || \
-docker cp root_redis_1:/data/dump.rdb $BACKUP_DIR/redis_$TIMESTAMP.rdb
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}Бэкап Redis успешно создан: redis_$TIMESTAMP.rdb${NC}"
-    message_id=$(send_telegram_file "$BACKUP_DIR/redis_$TIMESTAMP.rdb" "Redis backup: redis_$TIMESTAMP.rdb")
-    if [ -n "$message_id" ]; then
-        echo "$(date +%Y-%m-%d) $message_id" >> /root/n8n/backups/redis_message_ids.txt
-        send_telegram_message "✅ Бэкап Redis отправлен в Telegram: redis_$TIMESTAMP.rdb"
-    else
-        echo -e "${RED}Ошибка при отправке бэкапа Redis в Telegram${NC}"
-        send_telegram_message "❌ Ошибка при отправке бэкапа Redis в Telegram"
-    fi
-else
-    echo -e "${RED}Ошибка при создании бэкапа Redis${NC}"
-    send_telegram_message "❌ Ошибка при создании бэкапа Redis"
+    echo -e "${RED}Ошибка при создании бэкапа SQLite${NC}"
+    send_telegram_message "❌ Ошибка при создании бэкапа SQLite"
     exit 1
 fi
 
 # Удаление старых сообщений в Telegram
 echo "Удаляем старые бэкапы из Telegram (старше 4 недель)..."
-delete_old_telegram_messages "postgres"
-delete_old_telegram_messages "redis"
+delete_old_telegram_messages "sqlite"
 
 # Удаление старых бэкапов локально (старше 4 недель)
 echo "Удаляем локальные бэкапы старше 4 недель..."
-find $BACKUP_DIR -type f -name "*.sql" -mtime +28 -delete
-find $BACKUP_DIR -type f -name "*.rdb" -mtime +28 -delete
+find $BACKUP_DIR -type f -name "*.sqlite" -mtime +28 -delete
 
 echo -e "${GREEN}Бэкапы успешно созданы и отправлены в Telegram!${NC}"
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 23. Создание скрипта обновления с бэкапом
+# 19. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -446,7 +376,7 @@ send_telegram() {
 }
 
 echo -e "${GREEN}Запускаем бэкап перед обновлением...${NC}"
-send_telegram "🟢 Начинаем обновление n8n и баз данных..."
+send_telegram "🟢 Начинаем обновление n8n..."
 /root/backup-n8n.sh
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка бэкапа, обновление отменено${NC}"
@@ -472,12 +402,13 @@ docker image prune -f
 # Исправляем права перед запуском
 echo "Исправляем права доступа для /root/n8n/.n8n..."
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
+docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
 
 echo -e "${GREEN}Запускаем обновленные сервисы...${NC}"
 docker-compose up -d
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Обновление успешно завершено!${NC}"
-    send_telegram "🎉 Обновление n8n, pgAdmin и баз данных успешно завершено!"
+    send_telegram "🎉 Обновление n8n успешно завершено!"
 else
     echo -e "${RED}Ошибка при запуске сервисов${NC}"
     send_telegram "❌ Ошибка при запуске сервисов"
@@ -485,25 +416,20 @@ else
 fi
 EOF
 
-# 24. Настройка прав и cron
+# 20. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
 (crontab -l 2>/dev/null; echo "0 23 * * 6 /root/backup-n8n.sh") | crontab -
 (crontab -l 2>/dev/null; echo "0 0 * * 0 /root/update-n8n.sh") | crontab -
 
-echo -e "${GREEN}Установка n8n, PostgreSQL, pgAdmin и Redis завершена!${NC}"
+echo -e "${GREEN}Установка n8n завершена!${NC}"
 echo "Доступ к n8n: https://$SUBDOMAIN.$DOMAIN_NAME"
-echo "Доступ к PostgreSQL: localhost:5432 (используйте psql или клиент PostgreSQL)"
-echo "Доступ к pgAdmin: https://pgadmin.$DOMAIN_NAME"
 echo "Логин n8n: $N8N_BASIC_AUTH_USER"
-echo "Логин pgAdmin: $PGADMIN_EMAIL"
-echo "Пароли: [скрыты]"
+echo "Пароль: [скрыт]"
 echo "Папка для файлов: /root/n8n/local-files (доступна в n8n как /files/)"
 echo "Папка для бэкапов: /root/n8n/backups"
 echo "Бэкапы настроены на каждую субботу в 23:00, отправка в Telegram (Chat ID: $TELEGRAM_CHAT_ID)"
 echo "Автообновление настроено на каждое воскресенье в 00:00, с удалением старых контейнеров n8n"
 echo "Уведомления и бэкапы отправляются в Telegram (Chat ID: $TELEGRAM_CHAT_ID)"
-echo -e "${GREEN}Для подключения к PostgreSQL используйте: psql -h localhost -U $POSTGRES_USER -d n8n${NC}"
-echo -e "${GREEN}В pgAdmin настройте сервер: Host=postgres, Port=5432, Username=$POSTGRES_USER, Database=n8n${NC}"
-echo -e "${GREEN}Бэкапы хранятся в Telegram, скачивайте их из чата (Chat ID: $TELEGRAM_CHAT_ID)${NC}"
+echo -e "${GREEN}Примечание: n8n использует SQLite, хранящуюся в /root/n8n/.n8n/database.sqlite${NC}"
