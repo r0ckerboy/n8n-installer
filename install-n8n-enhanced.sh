@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 # Цветной вывод
@@ -16,7 +15,7 @@ fi
 echo "Настройка установки n8n, Qdrant и pgAdmin..."
 read -p "Введите домен (например, nightcity2077.ru): " DOMAIN_NAME
 read -p "Введите email для SSL и pgAdmin (например, admin@nightcity2077.ru): " EMAIL
-read -sp "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
+read -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
 read -p "Введите Telegram Bot Token (например, 123456:ABC-DEF): " TELEGRAM_TOKEN
 read -p "Введите Telegram Chat ID (например, -123456789): " TELEGRAM_CHAT_ID
@@ -97,7 +96,7 @@ timedatectl set-timezone Europe/Moscow
 echo -e "${GREEN}Таймзона установлена${NC}"
 
 # 8. Создание директорий
-echo "Создаем необходимые директории..."
+echo "Создаем необходимые директории...";
 mkdir -p /root/n8n/{postgres,redis,letsencrypt,qdrant,backups} > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка создания директорий${NC}"
@@ -246,7 +245,7 @@ services:
       - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}
       - N8N_BASIC_AUTH_ACTIVE=\${N8N_BASIC_AUTH_ACTIVE}
       - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_BASIC_AUTH_PASSWORD=\${N8N_AUTH_PASSWORD}
       - N8N_RUNNERS_ENABLED=true
       - TZ=\${TZ}
     volumes:
@@ -302,7 +301,7 @@ services:
     restart: always
     ports:
       - "\${QDRANT_PORT}:6333"
-    volumes:
+    volumes
       - \${DATA_FOLDER}/qdrant:/qdrant/storage
     environment:
       - QDRANT__STORAGE__STORAGE_MODE=mmap
