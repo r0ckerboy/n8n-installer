@@ -92,8 +92,10 @@ fi
 
 # 11. Исправление прав доступа для n8n заранее
 echo "Исправляем права доступа для /root/n8n/.n8n..."
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
+rm -rf /root/n8n/.n8n
+mkdir -p /root/n8n/.n8n
+chown 1000:1000 /root/n8n/.n8n
+chmod 700 /root/n8n/.n8n
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при установке прав доступа для /root/n8n/.n8n${NC}"
     exit 1
@@ -213,8 +215,8 @@ services:
     image: dpage/pgadmin4:latest
     restart: always
     environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@example.com}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD:-admin}
       - PGADMIN_CONFIG_SERVER_MODE=False
       - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
     volumes:
@@ -309,7 +311,7 @@ read -p "Введите пользователя PostgreSQL (только бук
 read -s -p "Введите пароль PostgreSQL (только буквы и цифры, макс. 32 символа): " POSTGRES_PASSWORD
 echo
 read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
-read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
+read -s -p "Введите пароль для pgAdmin: " PGADMIN_DEFAULT_PASSWORD
 echo
 read -p "Введите пароль Redis (только буквы и цифры, макс. 32 символа): " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
@@ -330,6 +332,10 @@ if ! [[ "$REDIS_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]] || [ ${#REDIS_PASSWORD} -gt 32 ];
     echo -e "${RED}Ошибка: REDIS_PASSWORD должен содержать только буквы и цифры и быть не длиннее 32 символов${NC}"
     exit 1
 fi
+if [ -z "$PGADMIN_EMAIL" ] || [ -z "$PGADMIN_DEFAULT_PASSWORD" ]; then
+    echo -e "${RED}Ошибка: PGADMIN_EMAIL и PGADMIN_DEFAULT_PASSWORD не могут быть пустыми${NC}"
+    exit 1
+fi
 
 # 16. Создание .env файла
 echo "Создаем .env файл..."
@@ -342,7 +348,7 @@ N8N_BASIC_AUTH_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
 POSTGRES_USER=$POSTGRES_USER
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 PGADMIN_EMAIL=$PGADMIN_EMAIL
-PGADMIN_DEFAULT_PASSWORD=$PGADMIN_PASSWORD
+PGADMIN_DEFAULT_PASSWORD=$PGADMIN_DEFAULT_PASSWORD
 REDIS_PASSWORD=$REDIS_PASSWORD
 SSL_EMAIL=$SSL_EMAIL
 GENERIC_TIMEZONE=$GENERIC_TIMEZONE
@@ -354,20 +360,15 @@ EOF
 echo "Создаем Docker-сеть n8n-network..."
 docker network create n8n-network 2>/dev/null || true
 
-# 18. Запуск сервисов с исправлением прав
+# 18. Запуск сервисов
 echo "Запускаем сервисы..."
 cd /root
 # Остановка всех контейнеров
 docker stop $(docker ps -q) 2>/dev/null || true
 # Удаление всех остановленных контейнеров
 docker rm $(docker ps -a -q) 2>/dev/null || true
-# Удаление всех образов для исключения кэширования
-docker image rm $(docker images -q) -f 2>/dev/null || true
 # Очистка неиспользуемых данных Docker
 docker system prune -f 2>/dev/null || true
-# Повторное исправление прав для .n8n
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
 # Повторное очищение и настройка /root/n8n/postgres перед запуском
 rm -rf /root/n8n/postgres
 mkdir -p /root/n8n/postgres
@@ -398,6 +399,8 @@ if [ $? -ne 0 ]; then
     docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
     echo "Логи Traefik для диагностики:"
     docker logs root-traefik-1 2>/dev/null || echo "Контейнер root-traefik-1 отсутствует"
+    echo "Логи pgAdmin для диагностики:"
+    docker logs root-pgadmin-1 2>/dev/null || echo "Контейнер root-pgadmin-1 отсутствует"
     echo "Содержимое /root/n8n/postgres после ошибки:"
     ls -la /root/n8n/postgres
     exit 1
@@ -433,7 +436,7 @@ if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к Redis из n8n${NC}"
     echo "Логи Redis:"
     docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
-    echo " fibre Логи n8n:"
+    echo "Логи n8n:"
     docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     exit 1
 else
@@ -456,28 +459,40 @@ else
     exit 1
 fi
 
-# 24. Проверка логов Traefik
+# 24. Проверка доступности pgAdmin
+echo "Проверяем доступность pgAdmin..."
+curl -s -f http://127.0.0.1:5050 > /dev/null
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}pgAdmin доступен на http://127.0.0.1:5050${NC}"
+else
+    echo -e "${RED}Ошибка: pgAdmin не отвечает на http://127.0.0.1:5050${NC}"
+    echo "Логи pgAdmin:"
+    docker logs root-pgadmin-1 2>/dev/null || echo "Контейнер root-pgadmin-1 отсутствует"
+    exit 1
+fi
+
+# 25. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..."
 docker logs root-traefik-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
 fi
 
-# 25. Проверка логов PostgreSQL
+# 26. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..."
 docker logs root-postgres-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте выше${NC}"
 fi
 
-# 26. Проверка логов Redis
+# 27. Проверка логов Redis
 echo "Проверяем логи Redis для диагностики..."
 docker logs root-redis-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Redis, проверьте выше${NC}"
 fi
 
-# 27. Создание скрипта бэкапа
+# 28. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -594,7 +609,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 28. Создание скрипта обновления с бэкапом
+# 29. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -643,11 +658,11 @@ rm -rf /root/n8n/postgres
 mkdir -p /root/n8n/postgres
 chmod 700 /root/n8n/postgres
 chown 999:999 /root/n8n/postgres
-
-# Исправляем права перед запуском
-echo "Исправляем права доступа для /root/n8n/.n8n..."
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
-docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
+# Очищаем и настраиваем /root/n8n/.n8n
+rm -rf /root/n8n/.n8n
+mkdir -p /root/n8n/.n8n
+chown 1000:1000 /root/n8n/.n8n
+chmod 700 /root/n8n/.n8n
 
 echo -e "${GREEN}Запускаем обновленные сервисы...${NC}"
 docker-compose up -d
@@ -661,7 +676,7 @@ else
 fi
 EOF
 
-# 29. Настройка прав и cron
+# 30. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
