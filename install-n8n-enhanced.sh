@@ -113,7 +113,7 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
-      - "--certificatesresolvers.mytlschallenge.acme.email=${PGADMIN_EMAIL}"
+      - "--certificatesresolvers.mytlschallenge.acme.email=\${PGADMIN_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
       - "--log.level=DEBUG"
     ports:
@@ -185,7 +185,7 @@ services:
       retries: 3
     labels:
       - traefik.enable=true
-      - traefik.http.routers.n8n.rule=Host(`\${SUBDOMAIN}.\${DOMAIN_NAME}`)
+      - traefik.http.routers.n8n.rule=Host(\`\${SUBDOMAIN}.\${DOMAIN_NAME}\`)
       - traefik.http.routers.n8n.entrypoints=websecure
       - traefik.http.routers.n8n.tls=true
       - traefik.http.routers.n8n.tls.certresolver=mytlschallenge
@@ -211,7 +211,7 @@ services:
       retries: 3
     labels:
       - traefik.enable=true
-      - traefik.http.routers.pgadmin.rule=Host(`pgadmin.\${DOMAIN_NAME}`)
+      - traefik.http.routers.pgadmin.rule=Host(\`pgadmin.\${DOMAIN_NAME}\`)
       - traefik.http.routers.pgadmin.entrypoints=websecure
       - traefik.http.routers.pgadmin.tls=true
       - traefik.http.routers.pgadmin.tls.certresolver=mytlschallenge
@@ -238,7 +238,7 @@ services:
       retries: 3
     labels:
       - traefik.enable=true
-      - traefik.http.routers.qdrant.rule=Host(`\${QDRANT_SUBDOMAIN}.\${DOMAIN_NAME}`)
+      - traefik.http.routers.qdrant.rule=Host(\`\${QDRANT_SUBDOMAIN}.\${DOMAIN_NAME}\`)
       - traefik.http.routers.qdrant.entrypoints=websecure
       - traefik.http.routers.qdrant.tls=true
       - traefik.http.routers.qdrant.tls.certresolver=mytlschallenge
@@ -257,13 +257,18 @@ else
     echo -e "${GREEN}docker-compose.yml создан${NC}"
 fi
 
-# 11. Исправление предупреждения Redis
+# 11. Проверка содержимого docker-compose.yml
+echo "Проверяем содержимое docker-compose.yml..."
+cat /root/docker-compose.yml
+echo -e "${GREEN}Проверка завершена${NC}"
+
+# 12. Исправление предупреждения Redis
 echo "Исправляем настройки Redis..."
 echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
 sysctl vm.overcommit_memory=1 > /dev/null 2>&1
 echo -e "${GREEN}Настройки Redis исправлены${NC}"
 
-# 12. Запуск Docker Compose
+# 13. Запуск Docker Compose
 echo "Запускаем Docker Compose..."
 docker-compose up -d > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -274,7 +279,7 @@ else
     echo -e "${GREEN}Docker Compose запущен${NC}"
 fi
 
-# 13. Проверка статуса контейнеров
+# 14. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 sleep 5
 docker ps -a
@@ -286,7 +291,7 @@ else
     echo -e "${GREEN}Все контейнеры запущены${NC}"
 fi
 
-# 14. Проверка готовности сервисов
+# 15. Проверка готовности сервисов
 echo "Ожидаем готовности сервисов..."
 timeout=120
 elapsed=0
@@ -318,7 +323,7 @@ for service in n8n pgadmin qdrant; do
     elapsed=0
 done
 
-# 15. Проверка подключения к PostgreSQL
+# 16. Проверка подключения к PostgreSQL
 echo "Проверяем подключение к PostgreSQL из контейнера postgres..."
 docker exec root-postgres-1 psql -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -330,7 +335,7 @@ else
     echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
 fi
 
-# 16. Проверка подключения к Redis
+# 17. Проверка подключения к Redis
 echo "Проверяем подключение к Redis из контейнера redis..."
 docker exec root-redis-1 redis-cli -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -342,7 +347,7 @@ else
     echo -e "${GREEN}Подключение к Redis успешно${NC}"
 fi
 
-# 17. Проверка доступности n8n
+# 18. Проверка доступности n8n
 echo "Проверяем доступность n8n..."
 curl -s -f http://127.0.0.1:5678/healthz > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -354,7 +359,7 @@ else
     echo -e "${GREEN}n8n доступен${NC}"
 fi
 
-# 18. Проверка доступности pgAdmin
+# 19. Проверка доступности pgAdmin
 echo "Проверяем доступность pgAdmin..."
 curl -s -f http://127.0.0.1:5050 > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -366,7 +371,7 @@ else
     echo -e "${GREEN}pgAdmin доступен${NC}"
 fi
 
-# 19. Проверка доступности Qdrant
+# 20. Проверка доступности Qdrant
 echo "Проверяем доступность Qdrant..."
 curl -s -f http://127.0.0.1:${QDRANT_PORT}/readyz > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -378,30 +383,30 @@ else
     echo -e "${GREEN}Qdrant доступен${NC}"
 fi
 
-# 20. Проверка DNS
+# 21. Проверка DNS
 echo "Проверяем DNS записи..."
-dig +short ${SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.156.24.62"
+dig +short ${SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.38.143.115"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для ${SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.156.24.62${NC}"
+    echo -e "${RED}DNS запись для ${SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
 else
     echo -e "${GREEN}DNS для ${SUBDOMAIN}.${DOMAIN_NAME} корректен${NC}"
 fi
 
-dig +short pgadmin.${DOMAIN_NAME} | grep -q "45.156.24.62"
+dig +short pgadmin.${DOMAIN_NAME} | grep -q "45.38.143.115"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для pgadmin.${DOMAIN_NAME} не указывает на 45.156.24.62${NC}"
+    echo -e "${RED}DNS запись для pgadmin.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
 else
     echo -e "${GREEN}DNS для pgadmin.${DOMAIN_NAME} корректен${NC}"
 fi
 
-dig +short ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.156.24.62"
+dig +short ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.38.143.115"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.156.24.62${NC}"
+    echo -e "${RED}DNS запись для ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
 else
     echo -e "${GREEN}DNS для ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} корректен${NC}"
 fi
 
-# 21. Проверка внешнего доступа
+# 22. Проверка внешнего доступа
 echo "Проверяем внешний доступ..."
 curl -k -s -f https://${SUBDOMAIN}.${DOMAIN_NAME}/healthz > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -424,7 +429,7 @@ else
     echo -e "${GREEN}Qdrant доступен по https://${QDRANT_SUBDOMAIN}.${DOMAIN_NAME}${NC}"
 fi
 
-# 22. Вывод учетных данных
+# 23. Вывод учетных данных
 echo -e "${GREEN}Установка завершена успешно!${NC}"
 echo "Учетные данные:"
 echo "pgAdmin: https://pgadmin.${DOMAIN_NAME}"
