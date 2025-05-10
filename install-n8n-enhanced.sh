@@ -416,28 +416,24 @@ echo "Ожидаем инициализации сервисов (60 секун�
 sleep 60
 
 # 21. Проверка подключения к PostgreSQL
-echo "Проверяем подключение к PostgreSQL из контейнера n8n..."
-docker exec root-n8n-1 psql -h postgres -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
+echo "Проверяем подключение к PostgreSQL из контейнера postgres..."
+docker exec root-postgres-1 psql -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка подключения к PostgreSQL из n8n${NC}"
+    echo -e "${RED}Ошибка подключения к PostgreSQL${NC}"
     echo "Логи PostgreSQL:"
     docker logs root-postgres-1 2>/dev/null || echo "Контейнер root-postgres-1 отсутствует"
-    echo "Логи n8n:"
-    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
 fi
 
 # 22. Проверка подключения к Redis
-echo "Проверяем подключение к Redis из контейнера n8n..."
-docker exec root-n8n-1 redis-cli -h redis -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
+echo "Проверяем подключение к Redis из контейнера redis..."
+docker exec root-redis-1 redis-cli -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка подключения к Redis из n8n${NC}"
+    echo -e "${RED}Ошибка подключения к Redis${NC}"
     echo "Логи Redis:"
     docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
-    echo "Логи n8n:"
-    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к Redis успешно${NC}"
