@@ -6,7 +6,7 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # 1. Проверка прав root
-if [ "$EUID" -ne 0 ]; then
+if [ "$(id -u)" != "0" ]; then
     echo -e "${RED}Этот скрипт должен выполняться от имени root${NC}"
     exit 1
 fi
@@ -96,7 +96,7 @@ timedatectl set-timezone Europe/Moscow
 echo -e "${GREEN}Таймзона установлена${NC}"
 
 # 8. Создание директорий
-echo "Создаем необходимые директории...";
+echo "Создаем необходимые директории..."
 mkdir -p /root/n8n/{postgres,redis,letsencrypt,qdrant,backups} > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка создания директорий${NC}"
@@ -301,7 +301,7 @@ services:
     restart: always
     ports:
       - "\${QDRANT_PORT}:6333"
-    volumes
+    volumes:
       - \${DATA_FOLDER}/qdrant:/qdrant/storage
     environment:
       - QDRANT__STORAGE__STORAGE_MODE=mmap
@@ -403,7 +403,7 @@ def main():
     application.add_handler(CommandHandler("logs", logs))
     application.run_polling()
 
-if __name__ == "__main__":
+if __Name__ == "__main__":
     main()
 EOL
 if [ $? -ne 0 ]; then
@@ -418,7 +418,7 @@ echo "Создаем скрипт бэкапа..."
 cat > /root/n8n/backup.sh <<EOL
 #!/bin/bash
 source /root/.env
-TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
+TIMESTAMP=\$(date +%Y%m%d_%sidH%M%S)
 BACKUP_FILE="/root/n8n/backups/n8n_backup_\${TIMESTAMP}.sql"
 docker exec root-postgres-1 pg_dump -U n8n n8n > \${BACKUP_FILE}
 curl -F "chat_id=\${TELEGRAM_CHAT_ID}" -F document=@\${BACKUP_FILE} "https://api.telegram.org/bot\${TELEGRAM_TOKEN}/sendDocument"
