@@ -7,6 +7,15 @@ if (( EUID != 0 )); then
   exit 1
 fi
 
+### Проверка и установка зависимостей
+echo "🔧 Проверка и установка необходимых пакетов..."
+if ! command -v git &>/dev/null; then
+    apt-get update && apt-get install -y git
+fi
+
+if ! command -v curl &>/dev/null; then
+    apt-get install -y curl
+fi
 clear
 echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant (Traefik)"
 echo "-----------------------------------------------------------"
