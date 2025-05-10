@@ -64,6 +64,7 @@ echo "Генерируем безопасные пароли..."
 POSTGRES_PASSWORD=$(openssl rand -base64 12)
 REDIS_PASSWORD=$(openssl rand -base64 12)
 PGADMIN_PASSWORD=$(openssl rand -base64 12)
+N8N_AUTH_PASSWORD=$(openssl rand -base64 12)
 
 # 8. Создание или обновление .env файла
 echo "Создаем/обновляем файл .env..."
@@ -79,6 +80,9 @@ PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
 QDRANT_PORT=6333
 QDRANT_SUBDOMAIN=qdrant
 DATA_FOLDER=/root/n8n
+N8N_BASIC_AUTH_ACTIVE=true
+N8N_BASIC_AUTH_USER=admin
+N8N_BASIC_AUTH_PASSWORD=${N8N_AUTH_PASSWORD}
 EOL
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка создания .env файла${NC}"
@@ -97,7 +101,19 @@ else
     echo -e "${GREEN}Переменные окружения загружены${NC}"
 fi
 
-# 10. Создание docker-compose.yml
+# 10. Проверка DNS
+echo "Проверяем DNS записи..."
+for domain in "${SUBDOMAIN}.${DOMAIN_NAME}" "pgadmin.${DOMAIN_NAME}" "${QDRANT_SUBDOMAIN}.${DOMAIN_NAME}"; do
+    if ! dig +short "$domain" | grep -q "45.38.143.115"; then
+        echo -e "${RED}DNS запись для $domain не указывает на 45.38.143.115${NC}"
+        echo "Пожалуйста, обновите A-запись в панели управления доменом."
+        exit 1
+    else
+        echo -e "${GREEN}DNS для $domain корректен${NC}"
+    fi
+done
+
+# 11. Создание docker-compose.yml
 echo "Создаем docker-compose.yml..."
 cat > /root/docker-compose.yml <<EOL
 version: '3.8'
@@ -115,7 +131,6 @@ services:
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
       - "--certificatesresolvers.mytlschallenge.acme.email=\${PGADMIN_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
-      - "--log.level=DEBUG"
     ports:
       - "443:443"
     volumes:
@@ -175,6 +190,9 @@ services:
       - DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}
       - QUEUE_BULL_REDIS_HOST=redis
       - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}
+      - N8N_BASIC_AUTH_ACTIVE=\${N8N_BASIC_AUTH_ACTIVE}
+      - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
       - N8N_RUNNERS_ENABLED=true
     volumes:
       - \${DATA_FOLDER}/.n8n:/home/node/.n8n
@@ -217,6 +235,9 @@ services:
       - traefik.http.routers.pgadmin.tls.certresolver=mytlschallenge
     depends_on:
       - postgres
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 0.25
     networks:
       - n8n-network
 
@@ -243,6 +264,9 @@ services:
       - traefik.http.routers.qdrant.tls=true
       - traefik.http.routers.qdrant.tls.certresolver=mytlschallenge
       - traefik.http.services.qdrant.loadbalancer.server.port=6333
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
     networks:
       - n8n-network
 
@@ -257,18 +281,18 @@ else
     echo -e "${GREEN}docker-compose.yml создан${NC}"
 fi
 
-# 11. Проверка содержимого docker-compose.yml
+# 12. Проверка содержимого docker-compose.yml
 echo "Проверяем содержимое docker-compose.yml..."
 cat /root/docker-compose.yml
 echo -e "${GREEN}Проверка завершена${NC}"
 
-# 12. Исправление предупреждения Redis
+# 13. Исправление настроек Redis
 echo "Исправляем настройки Redis..."
 echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
 sysctl vm.overcommit_memory=1 > /dev/null 2>&1
 echo -e "${GREEN}Настройки Redis исправлены${NC}"
 
-# 13. Запуск Docker Compose
+# 14. Запуск Docker Compose
 echo "Запускаем Docker Compose..."
 docker-compose up -d > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -279,7 +303,7 @@ else
     echo -e "${GREEN}Docker Compose запущен${NC}"
 fi
 
-# 14. Проверка статуса контейнеров
+# 15. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 sleep 5
 docker ps -a
@@ -291,7 +315,7 @@ else
     echo -e "${GREEN}Все контейнеры запущены${NC}"
 fi
 
-# 15. Проверка готовности сервисов
+# 16. Проверка готовности сервисов
 echo "Ожидаем готовности сервисов..."
 timeout=120
 elapsed=0
@@ -299,16 +323,19 @@ for service in n8n pgadmin qdrant; do
     case $service in
         n8n)
             port=5678
+            endpoint="/healthz"
             ;;
         pgadmin)
             port=5050
+            endpoint=""
             ;;
         qdrant)
             port=6333
+            endpoint="/readyz"
             ;;
     esac
     echo "Проверяем $service на порту $port..."
-    while ! curl -s -f http://127.0.0.1:$port/healthz > /dev/null 2>&1 && ! curl -s -f http://127.0.0.1:$port/readyz > /dev/null 2>&1; do
+    while ! curl -s -f http://127.0.0.1:$port$endpoint > /dev/null 2>&1; do
         if [ $elapsed -ge $timeout ]; then
             echo -e "${RED}Ошибка: $service не запустился за $timeout секунд${NC}"
             echo "Логи $service:"
@@ -323,90 +350,31 @@ for service in n8n pgadmin qdrant; do
     elapsed=0
 done
 
-# 16. Проверка подключения к PostgreSQL
-echo "Проверяем подключение к PostgreSQL из контейнера postgres..."
+# 17. Проверка подключения к PostgreSQL
+echo "Проверяем подключение к PostgreSQL..."
 docker exec root-postgres-1 psql -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к PostgreSQL${NC}"
     echo "Логи PostgreSQL:"
-    docker logs root-postgres-1 2>/dev/null || echo "Контейнер root-postgres-1 отсутствует"
+    docker logs root-postgres-1
     exit 1
 else
     echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
 fi
 
-# 17. Проверка подключения к Redis
-echo "Проверяем подключение к Redis из контейнера redis..."
+# 18. Проверка подключения к Redis
+echo "Проверяем подключение к Redis..."
 docker exec root-redis-1 redis-cli -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к Redis${NC}"
     echo "Логи Redis:"
-    docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
+    docker logs root-redis-1
     exit 1
 else
     echo -e "${GREEN}Подключение к Redis успешно${NC}"
 fi
 
-# 18. Проверка доступности n8n
-echo "Проверяем доступность n8n..."
-curl -s -f http://127.0.0.1:5678/healthz > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка: n8n не отвечает на http://127.0.0.1:5678${NC}"
-    echo "Логи n8n:"
-    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
-    exit 1
-else
-    echo -e "${GREEN}n8n доступен${NC}"
-fi
-
-# 19. Проверка доступности pgAdmin
-echo "Проверяем доступность pgAdmin..."
-curl -s -f http://127.0.0.1:5050 > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка: pgAdmin не отвечает на http://127.0.0.1:5050${NC}"
-    echo "Логи pgAdmin:"
-    docker logs root-pgadmin-1 2>/dev/null || echo "Контейнер root-pgadmin-1 отсутствует"
-    exit 1
-else
-    echo -e "${GREEN}pgAdmin доступен${NC}"
-fi
-
-# 20. Проверка доступности Qdrant
-echo "Проверяем доступность Qdrant..."
-curl -s -f http://127.0.0.1:${QDRANT_PORT}/readyz > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка: Qdrant не отвечает на http://127.0.0.1:${QDRANT_PORT}${NC}"
-    echo "Логи Qdrant:"
-    docker logs root-qdrant-1 2>/dev/null || echo "Контейнер root-qdrant-1 отсутствует"
-    exit 1
-else
-    echo -e "${GREEN}Qdrant доступен${NC}"
-fi
-
-# 21. Проверка DNS
-echo "Проверяем DNS записи..."
-dig +short ${SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.38.143.115"
-if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для ${SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
-else
-    echo -e "${GREEN}DNS для ${SUBDOMAIN}.${DOMAIN_NAME} корректен${NC}"
-fi
-
-dig +short pgadmin.${DOMAIN_NAME} | grep -q "45.38.143.115"
-if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для pgadmin.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
-else
-    echo -e "${GREEN}DNS для pgadmin.${DOMAIN_NAME} корректен${NC}"
-fi
-
-dig +short ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} | grep -q "45.38.143.115"
-if [ $? -ne 0 ]; then
-    echo -e "${RED}DNS запись для ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} не указывает на 45.38.143.115${NC}"
-else
-    echo -e "${GREEN}DNS для ${QDRANT_SUBDOMAIN}.${DOMAIN_NAME} корректен${NC}"
-fi
-
-# 22. Проверка внешнего доступа
+# 19. Проверка внешнего доступа
 echo "Проверяем внешний доступ..."
 curl -k -s -f https://${SUBDOMAIN}.${DOMAIN_NAME}/healthz > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -429,17 +397,10 @@ else
     echo -e "${GREEN}Qdrant доступен по https://${QDRANT_SUBDOMAIN}.${DOMAIN_NAME}${NC}"
 fi
 
-# 23. Вывод учетных данных
+# 20. Вывод учётных данных
 echo -e "${GREEN}Установка завершена успешно!${NC}"
-echo "Учетные данные:"
-echo "pgAdmin: https://pgadmin.${DOMAIN_NAME}"
-echo "  Email: ${PGADMIN_EMAIL}"
-echo "  Пароль: ${PGADMIN_DEFAULT_PASSWORD}"
-echo "n8n: https://${SUBDOMAIN}.${DOMAIN_NAME}"
-echo "Qdrant: https://${QDRANT_SUBDOMAIN}.${DOMAIN_NAME}"
-echo "PostgreSQL:"
-echo "  Пользователь: ${POSTGRES_USER}"
-echo "  Пароль: ${POSTGRES_PASSWORD}"
-echo "  База данных: ${POSTGRES_DB}"
-echo "Redis пароль: ${REDIS_PASSWORD}"
-echo -e "${GREEN}Сохраните эти данные в безопасном месте!${NC}"
+echo "Доступ к сервисам:"
+echo "  n8n: https://${SUBDOMAIN}.${DOMAIN_NAME} (логин: ${N8N_BASIC_AUTH_USER}, пароль: ${N8N_BASIC_AUTH_PASSWORD})"
+echo "  pgAdmin: https://pgadmin.${DOMAIN_NAME} (email: ${PGADMIN_EMAIL}, пароль: ${PGADMIN_DEFAULT_PASSWORD})"
+echo "  Qdrant: https://${QDRANT_SUBDOMAIN}.${DOMAIN_NAME}"
+echo -e "${GREEN}Сохраните учётные данные в безопасном месте!${NC}"
