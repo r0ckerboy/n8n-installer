@@ -61,6 +61,7 @@ echo "Создаем необходимые директории..."
 mkdir -p /root/n8n/.n8n
 mkdir -p /root/n8n/local-files
 mkdir -p /root/n8n/postgres
+mkdir -p /root/n8n/config
 mkdir -p /root/n8n/redis
 mkdir -p /root/n8n/backups
 mkdir -p /root/n8n/pgadmin
@@ -68,13 +69,24 @@ chmod -R 777 /root/n8n/local-files # Разрешаем чтение/запис�
 chmod -R 700 /root/n8n/backups # Ограничиваем доступ к бэкапам
 chmod -R 777 /root/n8n/pgadmin # Разрешаем доступ для pgAdmin
 
-# 10. Полная очистка директории PostgreSQL
-echo "Полностью очищаем директорию /root/n8n/postgres..."
+# 10. Полная очистка и настройка директории PostgreSQL
+echo "Полностью очищаем и настраиваем директорию /root/n8n/postgres..."
 rm -rf /root/n8n/postgres
 mkdir -p /root/n8n/postgres
+# Устанавливаем права и владельца, совместимого с пользователем postgres (UID 999)
 chmod 700 /root/n8n/postgres
+chown 999:999 /root/n8n/postgres
+# Проверяем права
+ls -ld /root/n8n/postgres
+# Проверяем содержимое директории
+echo "Содержимое /root/n8n/postgres перед запуском:"
+ls -la /root/n8n/postgres
+if [ "$(ls -A /root/n8n/postgres)" ]; then
+    echo -e "${RED}Ошибка: директория /root/n8n/postgres не пуста!${NC}"
+    exit 1
+fi
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка при очистке или создании директории /root/n8n/postgres${NC}"
+    echo -e "${RED}Ошибка при настройке директории /root/n8n/postgres${NC}"
     exit 1
 fi
 
@@ -174,18 +186,21 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=n8n
-      - LC_ALL=en_US.UTF-8
-      - LC_CTYPE=en_US.UTF-8
+      - LANG=C.UTF-8
     ports:
       - "5432:5432"
     volumes:
       - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
-      - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
+      - ${DATA_FOLDER}/config/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
       interval: 5s
       timeout: 10s
-      retries: 12
+      retries: 20
     deploy:
       resources:
         limits:
@@ -251,7 +266,8 @@ EOF
 
 # 13. Создание pg_hba.conf для PostgreSQL
 echo "Создаем pg_hba.conf для разрешения всех подключений..."
-cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
+mkdir -p /root/n8n/config
+cat > /root/n8n/config/pg_hba.conf << 'EOF'
 # Разрешаем все подключения с паролем
 host all all 0.0.0.0/0 md5
 host all all ::/0 md5
@@ -289,21 +305,29 @@ SUBDOMAIN=${SUBDOMAIN:-n8n}
 read -p "Введите логин для n8n: " N8N_BASIC_AUTH_USER
 read -s -p "Введите пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
 echo
-read -p "Введите пользователя PostgreSQL (только буквы и цифры): " POSTGRES_USER
-read -s -p "Введите пароль PostgreSQL (только буквы и цифры): " POSTGRES_PASSWORD
+read -p "Введите пользователя PostgreSQL (только буквы и цифры, макс. 32 символа): " POSTGRES_USER
+read -s -p "Введите пароль PostgreSQL (только буквы и цифры, макс. 32 символа): " POSTGRES_PASSWORD
 echo
 read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
 read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
-read -p "Введите пароль Redis (только буквы и цифры): " REDIS_PASSWORD
+read -p "Введите пароль Redis (только буквы и цифры, макс. 32 символа): " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
 read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
 read -p "Введите Telegram Chat ID: " TELEGRAM_CHAT_ID
 
-# Проверка учетных данных на допустимые символы
-if ! [[ "$POSTGRES_USER" =~ ^[a-zA-Z0-9]+$ ]] || ! [[ "$POSTGRES_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]] || ! [[ "$REDIS_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]]; then
-    echo -e "${RED}Ошибка: POSTGRES_USER, POSTGRES_PASSWORD и REDIS_PASSWORD должны содержать только буквы и цифры${NC}"
+# Проверка учетных данных на допустимые символы и длину
+if ! [[ "$POSTGRES_USER" =~ ^[a-zA-Z0-9]+$ ]] || [ ${#POSTGRES_USER} -gt 32 ]; then
+    echo -e "${RED}Ошибка: POSTGRES_USER должен содержать только буквы и цифры и быть не длиннее 32 символов${NC}"
+    exit 1
+fi
+if ! [[ "$POSTGRES_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]] || [ ${#POSTGRES_PASSWORD} -gt 32 ]; then
+    echo -e "${RED}Ошибка: POSTGRES_PASSWORD должен содержать только буквы и цифры и быть не длиннее 32 символов${NC}"
+    exit 1
+fi
+if ! [[ "$REDIS_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]] || [ ${#REDIS_PASSWORD} -gt 32 ]; then
+    echo -e "${RED}Ошибка: REDIS_PASSWORD должен содержать только буквы и цифры и быть не длиннее 32 символов${NC}"
     exit 1
 fi
 
@@ -337,21 +361,45 @@ cd /root
 docker stop $(docker ps -q) 2>/dev/null || true
 # Удаление всех остановленных контейнеров
 docker rm $(docker ps -a -q) 2>/dev/null || true
-# Повторное исправление прав
+# Удаление всех образов для исключения кэширования
+docker image rm $(docker images -q) -f 2>/dev/null || true
+# Очистка неиспользуемых данных Docker
+docker system prune -f 2>/dev/null || true
+# Повторное исправление прав для .n8n
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
+# Повторное очищение и настройка /root/n8n/postgres перед запуском
+rm -rf /root/n8n/postgres
+mkdir -p /root/n8n/postgres
+chmod 700 /root/n8n/postgres
+chown 999:999 /root/n8n/postgres
+# Пауза для синхронизации файловой системы
+sleep 2
+# Проверка содержимого
+echo "Содержимое /root/n8n/postgres перед запуском Docker Compose:"
+ls -la /root/n8n/postgres
+if [ "$(ls -A /root/n8n/postgres)" ]; then
+    echo -e "${RED}Ошибка: директория /root/n8n/postgres не пуста перед запуском!${NC}"
+    exit 1
+fi
+# Проверка прав
+ls -ld /root/n8n/postgres
 # Запуск
 docker-compose up -d
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при запуске контейнеров${NC}"
     echo "Состояние контейнеров:"
     docker ps -a
-    echo "Логи PostgreSQL для диагностики (если контейнер существует):"
-    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
-    echo "Логи n8n для диагностики (если контейнер существует):"
-    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
-    echo "Логи Redis для диагностики (если контейнер существует):"
-    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
+    echo "Логи PostgreSQL для диагностики:"
+    docker logs root-postgres-1 2>/dev/null || echo "Контейнер root-postgres-1 отсутствует"
+    echo "Логи n8n для диагностики:"
+    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
+    echo "Логи Redis для диагностики:"
+    docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
+    echo "Логи Traefik для диагностики:"
+    docker logs root-traefik-1 2>/dev/null || echo "Контейнер root-traefik-1 отсутствует"
+    echo "Содержимое /root/n8n/postgres после ошибки:"
+    ls -la /root/n8n/postgres
     exit 1
 fi
 
@@ -361,18 +409,18 @@ docker ps -a
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
 # 20. Даем время на инициализацию
-echo "Ожидаем инициализации сервисов (30 секунд)..."
-sleep 30
+echo "Ожидаем инициализации сервисов (60 секунд)..."
+sleep 60
 
 # 21. Проверка подключения к PostgreSQL
 echo "Проверяем подключение к PostgreSQL из контейнера n8n..."
-docker exec root_n8n_1 psql -h postgres -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
+docker exec root-n8n-1 psql -h postgres -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к PostgreSQL из n8n${NC}"
     echo "Логи PostgreSQL:"
-    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
+    docker logs root-postgres-1 2>/dev/null || echo "Контейнер root-postgres-1 отсутствует"
     echo "Логи n8n:"
-    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
+    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
@@ -380,13 +428,13 @@ fi
 
 # 22. Проверка подключения к Redis
 echo "Проверяем подключение к Redis из контейнера n8n..."
-docker exec root_n8n_1 redis-cli -h redis -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
+docker exec root-n8n-1 redis-cli -h redis -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к Redis из n8n${NC}"
     echo "Логи Redis:"
-    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
-    echo "Логи n8n:"
-    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
+    docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
+    echo " fibre Логи n8n:"
+    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к Redis успешно${NC}"
@@ -400,31 +448,31 @@ if [ $? -eq 0 ]; then
 else
     echo -e "${RED}Ошибка: n8n не отвечает на http://127.0.0.1:5678${NC}"
     echo "Логи n8n:"
-    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
+    docker logs root-n8n-1 2>/dev/null || echo "Контейнер root-n8n-1 отсутствует"
     echo "Логи PostgreSQL:"
-    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
+    docker logs root-postgres-1 2>/dev/null || echo "Контейнер root-postgres-1 отсутствует"
     echo "Логи Redis:"
-    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
+    docker logs root-redis-1 2>/dev/null || echo "Контейнер root-redis-1 отсутствует"
     exit 1
 fi
 
 # 24. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..."
-docker logs root_traefik_1 | grep -i error
+docker logs root-traefik-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
 fi
 
 # 25. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..."
-docker logs root_postgres_1 | grep -i error
+docker logs root-postgres-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте выше${NC}"
 fi
 
 # 26. Проверка логов Redis
 echo "Проверяем логи Redis для диагностики..."
-docker logs root_redis_1 | grep -i error
+docker logs root-redis-1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Redis, проверьте выше${NC}"
 fi
@@ -496,7 +544,7 @@ send_telegram_message "🟢 Начинаем создание бэкапов д�
 
 # Бэкап PostgreSQL
 echo "Создаем бэкап PostgreSQL..."
-docker exec -e PGPASSWORD=$POSTGRES_PASSWORD root_postgres_1 pg_dump -U $POSTGRES_USER $POSTGRES_DB > $BACKUP_DIR/postgres_$TIMESTAMP.sql
+docker exec -e PGPASSWORD=$POSTGRES_PASSWORD root-postgres-1 pg_dump -U $POSTGRES_USER $POSTGRES_DB > $BACKUP_DIR/postgres_$TIMESTAMP.sql
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Бэкап PostgreSQL успешно создан: postgres_$TIMESTAMP.sql${NC}"
     message_id=$(send_telegram_file "$BACKUP_DIR/postgres_$TIMESTAMP.sql" "PostgreSQL backup: postgres_$TIMESTAMP.sql")
@@ -515,7 +563,7 @@ fi
 
 # Бэкап Redis
 echo "Создаем бэкап Redis..."
-docker cp root_redis_1:/data/dump.rdb $BACKUP_DIR/redis_$TIMESTAMP.rdb
+docker cp root-redis-1:/data/dump.rdb $BACKUP_DIR/redis_$TIMESTAMP.rdb
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}Бэкап Redis успешно создан: redis_$TIMESTAMP.rdb${NC}"
     message_id=$(send_telegram_file "$BACKUP_DIR/redis_$TIMESTAMP.rdb" "Redis backup: redis_$TIMESTAMP.rdb")
@@ -590,6 +638,11 @@ docker-compose down
 # Удаляем все контейнеры n8n (включая остановленные)
 docker rm -f $(docker ps -a -q -f name=n8n) 2>/dev/null || true
 docker image prune -f
+# Очищаем и настраиваем /root/n8n/postgres
+rm -rf /root/n8n/postgres
+mkdir -p /root/n8n/postgres
+chmod 700 /root/n8n/postgres
+chown 999:999 /root/n8n/postgres
 
 # Исправляем права перед запуском
 echo "Исправляем права доступа для /root/n8n/.n8n..."
