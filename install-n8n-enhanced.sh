@@ -13,36 +13,50 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. Обновление индексов пакетов
+# 1. Проверка доступных ресурсов
+echo "Проверяем доступные ресурсы..."
+FREE_MEM=$(free -m | awk '/Mem:/ {print $4}')
+if [ "$FREE_MEM" -lt 500 ]; then
+    echo -e "${RED}Недостаточно свободной памяти ($FREE_MEM MB). Требуется минимум 500 MB.${NC}"
+    exit 1
+fi
+CPU_CORES=$(nproc)
+if [ "$CPU_CORES" -lt 1 ]; then
+    echo -e "${RED}Недостаточно CPU ядер ($CPU_CORES). Требуется минимум 1 ядро.${NC}"
+    exit 1
+fi
+echo "Ресурсы: $FREE_MEM MB памяти, $CPU_CORES CPU ядер"
+
+# 2. Обновление индексов пакетов
 echo "Обновляем индексы пакетов..."
 apt update
 
-# 2. Установка необходимых пакетов
+# 3. Установка необходимых пакетов
 echo "Устанавливаем необходимые пакеты..."
 apt install curl software-properties-common ca-certificates net-tools lsof -y
 
-# 3. Импорт GPG-ключа Docker
+# 4. Импорт GPG-ключа Docker
 echo "Импортируем GPG-ключ Docker..."
 wget -O- https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor | tee /etc/apt/keyrings/docker.gpg > /dev/null
 
-# 4. Добавление репозитория Docker
+# 5. Добавление репозитория Docker
 echo "Добавляем репозиторий Docker..."
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# 5. Повторное обновление индексов
+# 6. Повторное обновление индексов
 echo "Обновляем индексы пакетов после добавления репозитория..."
 apt update
 
-# 6. Установка Docker
+# 7. Установка Docker
 echo "Устанавливаем Docker..."
 apt install docker-ce -y
 
-# 7. Установка Docker Compose
+# 8. Установка Docker Compose
 echo "Устанавливаем Docker Compose..."
 curl -L "https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 
-# 8. Создание директорий
+# 9. Создание директорий
 echo "Создаем необходимые директории..."
 mkdir -p /root/n8n/.n8n
 mkdir -p /root/n8n/local-files
@@ -54,15 +68,17 @@ chmod -R 777 /root/n8n/local-files # Разрешаем чтение/запис�
 chmod -R 700 /root/n8n/backups # Ограничиваем доступ к бэкапам
 chmod -R 777 /root/n8n/pgadmin # Разрешаем доступ для pgAdmin
 
-# 9. Очистка директории PostgreSQL
-echo "Очищаем директорию /root/n8n/postgres для новой инициализации..."
-rm -rf /root/n8n/postgres/*
+# 10. Полная очистка директории PostgreSQL
+echo "Полностью очищаем директорию /root/n8n/postgres..."
+rm -rf /root/n8n/postgres
+mkdir -p /root/n8n/postgres
+chmod 700 /root/n8n/postgres
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Ошибка при очистке директории /root/n8n/postgres${NC}"
+    echo -e "${RED}Ошибка при очистке или создании директории /root/n8n/postgres${NC}"
     exit 1
 fi
 
-# 10. Исправление прав доступа для n8n заранее
+# 11. Исправление прав доступа для n8n заранее
 echo "Исправляем права доступа для /root/n8n/.n8n..."
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
@@ -74,7 +90,7 @@ fi
 ls -ld /root/n8n/.n8n
 echo "Права для /root/n8n/.n8n установлены"
 
-# 11. Создание docker-compose.yml
+# 12. Создание docker-compose.yml
 echo "Создаем docker-compose.yml..."
 cat > /root/docker-compose.yml << 'EOF'
 version: '3.8'
@@ -165,12 +181,16 @@ services:
     volumes:
       - ${DATA_FOLDER}/postgres:/var/lib/postgresql/data
       - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
-      - /root/n8n/postgres/postgresql.conf:/docker-entrypoint-initdb.d/postgresql.conf
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
       interval: 5s
       timeout: 10s
       retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     networks:
       - n8n-network
 
@@ -216,6 +236,11 @@ services:
       interval: 5s
       timeout: 10s
       retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
     networks:
       - n8n-network
 
@@ -224,21 +249,13 @@ networks:
     driver: bridge
 EOF
 
-# 12. Создание pg_hba.conf для PostgreSQL
-echo "Создаем pg_hba.conf для разрешения локальных подключений..."
+# 13. Создание pg_hba.conf для PostgreSQL
+echo "Создаем pg_hba.conf для разрешения всех подключений..."
 cat > /root/n8n/postgres/pg_hba.conf << 'EOF'
-# Разрешаем локальные подключения
-local all all md5
-host all all 127.0.0.1/32 md5
-host all all ::1/128 md5
-# Разрешаем подключения из Docker-сети
+# Разрешаем все подключения с паролем
 host all all 0.0.0.0/0 md5
-EOF
-
-# 13. Создание postgresql.conf для PostgreSQL
-echo "Создаем postgresql.conf для разрешения подключений..."
-cat > /root/n8n/postgres/postgresql.conf << 'EOF'
-listen_addresses = '*'
+host all all ::/0 md5
+local all all md5
 EOF
 
 # 14. Проверка портов
@@ -272,17 +289,23 @@ SUBDOMAIN=${SUBDOMAIN:-n8n}
 read -p "Введите логин для n8n: " N8N_BASIC_AUTH_USER
 read -s -p "Введите пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
 echo
-read -p "Введите пользователя PostgreSQL: " POSTGRES_USER
-read -s -p "Введите пароль PostgreSQL: " POSTGRES_PASSWORD
+read -p "Введите пользователя PostgreSQL (только буквы и цифры): " POSTGRES_USER
+read -s -p "Введите пароль PostgreSQL (только буквы и цифры): " POSTGRES_PASSWORD
 echo
 read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
 read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
-read -p "Введите пароль Redis: " REDIS_PASSWORD
+read -p "Введите пароль Redis (только буквы и цифры): " REDIS_PASSWORD
 read -p "Введите ваш email для SSL: " SSL_EMAIL
 read -p "Введите ваш часовой пояс (например, Europe/Moscow): " GENERIC_TIMEZONE
 read -p "Введите Telegram Bot Token: " TELEGRAM_BOT_TOKEN
 read -p "Введите Telegram Chat ID: " TELEGRAM_CHAT_ID
+
+# Проверка учетных данных на допустимые символы
+if ! [[ "$POSTGRES_USER" =~ ^[a-zA-Z0-9]+$ ]] || ! [[ "$POSTGRES_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]] || ! [[ "$REDIS_PASSWORD" =~ ^[a-zA-Z0-9]+$ ]]; then
+    echo -e "${RED}Ошибка: POSTGRES_USER, POSTGRES_PASSWORD и REDIS_PASSWORD должны содержать только буквы и цифры${NC}"
+    exit 1
+fi
 
 # 16. Создание .env файла
 echo "Создаем .env файл..."
@@ -303,11 +326,17 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 EOF
 
-# 17. Запуск сервисов с исправлением прав
+# 17. Создание Docker-сети
+echo "Создаем Docker-сеть n8n-network..."
+docker network create n8n-network 2>/dev/null || true
+
+# 18. Запуск сервисов с исправлением прав
 echo "Запускаем сервисы..."
 cd /root
 # Остановка всех контейнеров
 docker stop $(docker ps -q) 2>/dev/null || true
+# Удаление всех остановленных контейнеров
+docker rm $(docker ps -a -q) 2>/dev/null || true
 # Повторное исправление прав
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chown n8nio/base:16 -R node:node /home/node/.n8n
 docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint chmod n8nio/base:16 -R 600 /home/node/.n8n
@@ -315,87 +344,92 @@ docker run --rm -it --user root -v /root/n8n/.n8n:/home/node/.n8n --entrypoint c
 docker-compose up -d
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка при запуске контейнеров${NC}"
-    echo "Логи PostgreSQL для диагностики:"
-    docker logs root_postgres_1
-    echo "Логи n8n для диагностики:"
-    docker logs root_n8n_1
-    echo "Логи Redis для диагностики:"
-    docker logs root_redis_1
+    echo "Состояние контейнеров:"
+    docker ps -a
+    echo "Логи PostgreSQL для диагностики (если контейнер существует):"
+    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
+    echo "Логи n8n для диагностики (если контейнер существует):"
+    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
+    echo "Логи Redis для диагностики (если контейнер существует):"
+    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
     exit 1
 fi
 
-# 18. Проверка статуса контейнеров
+# 19. Проверка статуса контейнеров
 echo "Проверяем статус контейнеров..."
 docker ps -a
 echo "Если контейнеры не запущены, проверьте логи с помощью: docker logs <container_name>"
 
-# 19. Проверка подключения к PostgreSQL
+# 20. Даем время на инициализацию
+echo "Ожидаем инициализации сервисов (30 секунд)..."
+sleep 30
+
+# 21. Проверка подключения к PostgreSQL
 echo "Проверяем подключение к PostgreSQL из контейнера n8n..."
 docker exec root_n8n_1 psql -h postgres -U ${POSTGRES_USER} -d n8n -c "SELECT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к PostgreSQL из n8n${NC}"
     echo "Логи PostgreSQL:"
-    docker logs root_postgres_1
+    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
     echo "Логи n8n:"
-    docker logs root_n8n_1
+    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к PostgreSQL успешно${NC}"
 fi
 
-# 20. Проверка подключения к Redis
+# 22. Проверка подключения к Redis
 echo "Проверяем подключение к Redis из контейнера n8n..."
 docker exec root_n8n_1 redis-cli -h redis -a ${REDIS_PASSWORD} ping > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка подключения к Redis из n8n${NC}"
     echo "Логи Redis:"
-    docker logs root_redis_1
+    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
     echo "Логи n8n:"
-    docker logs root_n8n_1
+    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
     exit 1
 else
     echo -e "${GREEN}Подключение к Redis успешно${NC}"
 fi
 
-# 21. Проверка доступности n8n
+# 23. Проверка доступности n8n
 echo "Проверяем доступность n8n..."
-sleep 15 # Даем больше времени на запуск
 curl -s -f http://127.0.0.1:5678/healthz > /dev/null
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}n8n доступен на http://127.0.0.1:5678${NC}"
 else
     echo -e "${RED}Ошибка: n8n не отвечает на http://127.0.0.1:5678${NC}"
     echo "Логи n8n:"
-    docker logs root_n8n_1
+    docker logs root_n8n_1 2>/dev/null || echo "Контейнер root_n8n_1 отсутствует"
     echo "Логи PostgreSQL:"
-    docker logs root_postgres_1
+    docker logs root_postgres_1 2>/dev/null || echo "Контейнер root_postgres_1 отсутствует"
     echo "Логи Redis:"
-    docker logs root_redis_1
+    docker logs root_redis_1 2>/dev/null || echo "Контейнер root_redis_1 отсутствует"
     exit 1
 fi
 
-# 22. Проверка логов Traefik
+# 24. Проверка логов Traefik
 echo "Проверяем логи Traefik для диагностики..."
 docker logs root_traefik_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Traefik, проверьте выше${NC}"
 fi
 
-# 23. Проверка логов PostgreSQL
+# 25. Проверка логов PostgreSQL
 echo "Проверяем логи PostgreSQL для диагностики..."
 docker logs root_postgres_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах PostgreSQL, проверьте выше${NC}"
 fi
 
-# 24. Проверка логов Redis
+# 26. Проверка логов Redis
 echo "Проверяем логи Redis для диагностики..."
 docker logs root_redis_1 | grep -i error
 if [ $? -eq 0 ]; then
     echo -e "${RED}Обнаружены ошибки в логах Redis, проверьте выше${NC}"
 fi
 
-# 25. Создание скрипта бэкапа
+# 27. Создание скрипта бэкапа
 echo "Создаем скрипт бэкапа..."
 cat > /root/backup-n8n.sh << 'EOF'
 #!/bin/bash
@@ -512,7 +546,7 @@ echo -e "${GREEN}Бэкапы успешно созданы и отправле�
 send_telegram_message "🎉 Бэкапы успешно завершены и отправлены в Telegram!"
 EOF
 
-# 26. Создание скрипта обновления с бэкапом
+# 28. Создание скрипта обновления с бэкапом
 echo "Создаем скрипт обновления с бэкапом..."
 cat > /root/update-n8n.sh << 'EOF'
 #!/bin/bash
@@ -574,7 +608,7 @@ else
 fi
 EOF
 
-# 27. Настройка прав и cron
+# 29. Настройка прав и cron
 echo "Настраиваем бэкапы и автообновление..."
 chmod +x /root/backup-n8n.sh
 chmod +x /root/update-n8n.sh
