@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # Цветной вывод
@@ -32,20 +33,25 @@ fi
 
 # 3. Обновление системы
 echo "Обновляем систему..."
+# Проверка и снятие блокировок
+if [ -f /var/lib/dpkg/lock-frontend ]; then
+    echo "Обнаружена блокировка dpkg, пытаемся устранить..."
+    ps aux | grep -E 'apt|dpkg' | grep -v grep | awk '{print $2}' | xargs -r kill -9
+    rm -f /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock
+    dpkg --configure -a
+fi
 # Проверка доступности репозиториев
 if ! ping -c 1 archive.ubuntu.com > /dev/null 2>&1; then
     echo -e "${RED}Репозитории Ubuntu недоступны${NC}"
     exit 1
 fi
 # Выполнение с таймаутом и повторами
-timeout 300 apt update -o Acquire::Retries=3 > /root/update.log 2>&1 &
-wait $!
+timeout 300 apt update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 > /root/update.log 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка обновления системы (см. /root/update.log)${NC}"
     exit 1
 fi
-timeout 600 apt upgrade -y -o Acquire::Retries=3 >> /root/update.log 2>&1 &
-wait $!
+timeout 600 apt upgrade -y -o Acquire::Retries=5 -o Acquire::http::Timeout=30 >> /root/update.log 2>&1
 if [ $? -ne 0 ]; then
     echo -e "${RED}Ошибка обновления системы (см. /root/update.log)${NC}"
     exit 1
@@ -510,7 +516,7 @@ for service in n8n pgadmin qdrant; do
         sleep 5
         elapsed=$((elapsed + 5))
     done
-    echo -e "${GREEN}service готов${NC}"
+    echo -e "${GREEN}$service готов${NC}"
     elapsed=0
 done
 
