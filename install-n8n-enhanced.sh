@@ -9,13 +9,12 @@ fi
 
 ### Проверка и установка зависимостей
 echo "🔧 Проверка и установка необходимых пакетов..."
-if ! command -v git &>/dev/null; then
-    apt-get update && apt-get install -y git
-fi
+for pkg in git curl wget openssl; do
+  if ! command -v $pkg &>/dev/null; then
+    apt-get update && apt-get install -y $pkg
+  fi
+done
 
-if ! command -v curl &>/dev/null; then
-    apt-get install -y curl
-fi
 clear
 echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant (Traefik)"
 echo "-----------------------------------------------------------"
@@ -66,9 +65,10 @@ EOF
 chmod 600 .env
 
 ### 5. Создание директорий
-mkdir -p traefik/{acme,logs} postgres-data pgadmin-data qdrant/storage backups
+mkdir -p traefik/{acme,logs} postgres-data pgadmin-data qdrant/storage backups data
 touch traefik/acme/acme.json
 chmod 600 traefik/acme/acme.json
+chown -R 1000:1000 data backups
 
 ### 6. Конфиг Traefik (traefik.yml)
 cat > "traefik.yml" <<EOF
@@ -238,14 +238,31 @@ services:
 EOF
 
 ### 9. Сборка и запуск
+echo "🚀 Запуск системы..."
 docker build -f Dockerfile.n8n -t n8n-custom:latest .
 docker compose up -d
 
-### 10. Настройка cron
+### 10. Проверка и исправление прав n8n
+echo "🔍 Проверка работы n8n..."
+sleep 15  # Ожидаем запуск сервисов
+
+if docker compose logs n8n | grep -q "404\|Bad Gateway\|EACCES"; then
+  echo "⚠️ Обнаружены проблемы с правами доступа. Исправляем..."
+  docker compose stop n8n
+  docker run --rm -it --user root \
+    -v /opt/n8n-install/data:/home/node/.n8n \
+    --entrypoint chown \
+    n8nio/base:16 \
+    -R node:node /home/node/.n8n
+  docker compose start n8n
+  echo "✅ Права доступа исправлены"
+fi
+
+### 11. Настройка cron
 chmod +x ./backup_n8n.sh
 (crontab -l 2>/dev/null; echo "0 2 * * * /opt/n8n-install/backup_n8n.sh >> /opt/n8n-install/backup.log 2>&1") | crontab -
 
-### 11. Уведомление в Telegram
+### 12. Уведомление в Telegram
 curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
   -d chat_id=$TG_USER_ID \
   -d text="✅ Установка завершена! Доступно:
@@ -253,11 +270,24 @@ curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
   • pgAdmin: https://pgadmin.$BASE_DOMAIN
   • Qdrant: https://qdrant.$BASE_DOMAIN"
 
-### 12. Финальный вывод
+### 13. Финальная проверка
+echo "🔎 Проверка состояния сервисов..."
+for service in n8n pgadmin qdrant; do
+  if docker compose ps $service | grep -q "running"; then
+    echo "✅ $service работает нормально"
+  else
+    echo "❌ $service имеет проблемы. Проверьте логи: docker compose logs $service"
+  fi
+done
+
+### 14. Финальный вывод
 echo "📦 Активные контейнеры:"
 docker ps --format "table {{.Names}}\t{{.Status}}"
 
-echo "🎉 Готово! Доступные сервисы:"
+echo "🎉 Установка завершена! Доступные сервисы:"
 echo "  • n8n: https://n8n.$BASE_DOMAIN"
 echo "  • pgAdmin: https://pgadmin.$BASE_DOMAIN"
 echo "  • Qdrant: https://qdrant.$BASE_DOMAIN"
+echo ""
+echo "ℹ️  Если какие-то сервисы недоступны, проверьте логи командой:"
+echo "   docker compose logs [n8n|pgadmin|qdrant]"
