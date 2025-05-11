@@ -7,9 +7,8 @@ if (( EUID != 0 )); then
   exit 1
 fi
 
-### Установка зависимостей (оптимизированная версия)
+### Установка зависимостей
 echo "🔧 Установка необходимых пакетов..."
-export DEBIAN_FRONTEND=noninteractive
 apt-get update > /dev/null
 for pkg in git curl wget openssl; do
   if ! command -v $pkg &>/dev/null; then
@@ -44,8 +43,8 @@ read -p "📧 Введите email для Let's Encrypt: " EMAIL
 read -p "🔐 Введите пароль для Postgres: " POSTGRES_PASSWORD
 read -p "🔑 Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 read -p "🔴 Введите пароль для Redis (Enter для генерации): " REDIS_PASSWORD
-read -p "🤖 Введите Telegram Bot Token: " TG_BOT_TOKEN
-read -p "👤 Введите Telegram User ID: " TG_USER_ID
+read -p "🤖 Введите Telegram Bot Token (необязательно): " TG_BOT_TOKEN
+read -p "👤 Введите Telegram User ID (необязательно): " TG_USER_ID
 
 [ -z "$REDIS_PASSWORD" ] && REDIS_PASSWORD=$(openssl rand -hex 16)
 N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)
@@ -64,11 +63,11 @@ POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 PGADMIN_PASSWORD=$PGADMIN_PASSWORD
 REDIS_PASSWORD=$REDIS_PASSWORD
 N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
-TG_BOT_TOKEN=$TG_BOT_TOKEN
-TG_USER_ID=$TG_USER_ID
+TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
+TG_USER_ID=${TG_USER_ID:-}
 EOF
 
-### Конфигурация Traefik (с автоматическим выбором метода проверки)
+### Конфигурация Traefik
 cat > traefik.yml <<EOF
 global:
   sendAnonymousUsage: false
@@ -95,7 +94,6 @@ certificatesResolvers:
     acme:
       email: $EMAIL
       storage: /etc/traefik/acme/acme.json
-      caServer: "https://acme-staging-v02.api.letsencrypt.org/directory"
       httpChallenge:
         entryPoint: web
 EOF
@@ -153,8 +151,10 @@ http:
           - url: http://qdrant:6333
 EOF
 
-### Docker Compose с Redis
+### Docker Compose конфигурация
 cat > docker-compose.yml <<EOF
+version: '3.8'
+
 services:
   traefik:
     image: traefik:v2.10
@@ -229,20 +229,44 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+EOF
+
+### Настройка Telegram бота (если указаны токен и ID)
+if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_USER_ID" ]; then
+  echo "🤖 Настройка Telegram бота..."
+  mkdir -p $INSTALL_DIR/bot
+  cat > $INSTALL_DIR/bot/Dockerfile <<EOF
+FROM python:3.9-slim
+WORKDIR /app
+RUN pip install python-telegram-bot
+COPY bot.py .
+CMD ["python", "bot.py"]
+EOF
+
+  cat > $INSTALL_DIR/bot/bot.py <<EOF
+import os
+from telegram import Bot
+bot = Bot(token=os.getenv('TG_BOT_TOKEN'))
+bot.send_message(chat_id=os.getenv('TG_USER_ID'), text='✅ Установка завершена!')
+EOF
+
+  cat >> docker-compose.yml <<EOF
 
   bot:
-    image: your-telegram-bot-image
+    build: ./bot
     restart: unless-stopped
     environment:
       - TG_BOT_TOKEN=\${TG_BOT_TOKEN}
       - TG_USER_ID=\${TG_USER_ID}
 EOF
+fi
 
 ### Запуск системы
 echo "🚀 Запуск сервисов..."
 docker compose up -d
 
 ### Настройка автообновлений
+echo "⏳ Настройка автообновлений..."
 cat > /usr/local/bin/update-n8n <<EOF
 #!/bin/bash
 cd $INSTALL_DIR
@@ -254,8 +278,8 @@ chmod +x /usr/local/bin/update-n8n
 
 (crontab -l 2>/dev/null; echo "0 3 * * 0 /usr/local/bin/update-n8n >> /var/log/n8n-update.log 2>&1") | crontab -
 
-### Проверка и уведомление
-echo "⏳ Ожидание запуска сервисов..."
+### Проверка сервисов
+echo "🔍 Проверка состояния сервисов..."
 sleep 15
 
 check_service() {
@@ -269,25 +293,26 @@ check_service() {
   fi
 }
 
-check_service traefik
-check_service n8n
-check_service postgres
-check_service pgadmin
-check_service qdrant
-check_service redis
+services=("traefik" "n8n" "postgres" "pgadmin" "qdrant" "redis")
+[ -n "$TG_BOT_TOKEN" ] && services+=("bot")
 
-### Отправка уведомления
-curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-  -d chat_id="$TG_USER_ID" \
-  -d text="✅ Установка завершена!
-• n8n: https://n8n.$BASE_DOMAIN
-• pgAdmin: https://pgadmin.$BASE_DOMAIN (логин: $EMAIL, пароль: $PGADMIN_PASSWORD)
-• Redis пароль: $REDIS_PASSWORD
-• PostgreSQL пароль: $POSTGRES_PASSWORD"
+for service in "${services[@]}"; do
+  check_service $service
+done
 
+### Отправка уведомления (если настроен бот)
+if [ -n "$TG_BOT_TOKEN" ]; then
+  echo "📨 Отправка уведомления в Telegram..."
+  docker compose exec bot python bot.py
+fi
+
+### Финальный вывод
 echo "🎉 Установка завершена!"
 echo "Доступные сервисы:"
 echo "- n8n: https://n8n.$BASE_DOMAIN"
-echo "- pgAdmin: https://pgadmin.$BASE_DOMAIN"
+echo "- pgAdmin: https://pgadmin.$BASE_DOMAIN (логин: $EMAIL, пароль: $PGADMIN_PASSWORD)"
 echo "- Qdrant: https://qdrant.$BASE_DOMAIN"
 echo "- Redis пароль: $REDIS_PASSWORD"
+echo "- PostgreSQL пароль: $POSTGRES_PASSWORD"
+echo ""
+echo "Автообновления настроены на каждое воскресенье в 3:00"
