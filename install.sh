@@ -7,68 +7,74 @@ if (( EUID != 0 )); then
   exit 1
 fi
 
-### Установка зависимостей
-echo "🔧 Установка необходимых пакетов..."
-apt-get update > /dev/null
+### Проверка и установка зависимостей
+echo "🔧 Проверка и установка необходимых пакетов..."
 for pkg in git curl wget openssl; do
   if ! command -v $pkg &>/dev/null; then
-    apt-get install -y $pkg > /dev/null
+    apt-get update && apt-get install -y $pkg
   fi
 done
 
-### Проверка и установка Docker
-if ! command -v docker &>/dev/null; then
-  echo "🐳 Установка Docker..."
-  curl -fsSL https://get.docker.com | sh > /dev/null
-  systemctl enable --now docker > /dev/null
-fi
-
-### Проверка Docker Compose
-if ! command -v docker compose &>/dev/null; then
-  echo "📦 Установка Docker Compose..."
-  DOCKER_CONFIG=${DOCKER_CONFIG:-/usr/local/lib/docker}
-  mkdir -p $DOCKER_CONFIG/cli-plugins
-  curl -SL https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose > /dev/null
-  chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
-  ln -s $DOCKER_CONFIG/cli-plugins/docker-compose /usr/bin/docker-compose
-fi
-
-### Получение параметров
 clear
-echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant + Redis"
+echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant (Traefik)"
 echo "-----------------------------------------------------------"
 
+### 1. Ввод переменных
 read -p "🌐 Введите базовый домен (например: example.com): " BASE_DOMAIN
 read -p "📧 Введите email для Let's Encrypt: " EMAIL
 read -p "🔐 Введите пароль для Postgres: " POSTGRES_PASSWORD
 read -p "🔑 Введите пароль для pgAdmin: " PGADMIN_PASSWORD
-read -p "🔴 Введите пароль для Redis (Enter для генерации): " REDIS_PASSWORD
-read -p "🤖 Введите Telegram Bot Token (необязательно): " TG_BOT_TOKEN
-read -p "👤 Введите Telegram User ID (необязательно): " TG_USER_ID
+read -p "🤖 Введите Telegram Bot Token: " TG_BOT_TOKEN
+read -p "👤 Введите Telegram User ID: " TG_USER_ID
+read -p "🗝️  Введите ключ шифрования n8n (Enter для генерации): " N8N_ENCRYPTION_KEY
 
-[ -z "$REDIS_PASSWORD" ] && REDIS_PASSWORD=$(openssl rand -hex 16)
-N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)
+if [ -z "$N8N_ENCRYPTION_KEY" ]; then
+  N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)
+  echo "✅ Сгенерирован ключ шифрования: $N8N_ENCRYPTION_KEY"
+fi
 
-### Создание структуры проекта
-echo "📂 Создание структуры каталогов..."
-INSTALL_DIR="/opt/n8n-install"
-mkdir -p $INSTALL_DIR/{traefik,postgres-data,pgadmin-data,qdrant/storage,redis-data,backups,data}
-cd $INSTALL_DIR
+### 2. Установка Docker и Compose
+echo "📦 Проверка Docker..."
+if ! command -v docker &>/dev/null; then
+  curl -fsSL https://get.docker.com | sh
+fi
 
-### Генерация .env файла
-cat > .env <<EOF
+if ! command -v docker compose &>/dev/null; then
+  curl -SL https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+  ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose || true
+fi
+
+### 3. Клонирование проекта
+echo "📥 Клонируем проект..."
+rm -rf /opt/n8n-install
+git clone https://github.com/kalininlive/n8n-beget-install.git /opt/n8n-install
+cd /opt/n8n-install
+
+### 4. Генерация .env
+cat > ".env" <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
 EMAIL=$EMAIL
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 PGADMIN_PASSWORD=$PGADMIN_PASSWORD
-REDIS_PASSWORD=$REDIS_PASSWORD
 N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
-TG_BOT_TOKEN=${TG_BOT_TOKEN:-}
-TG_USER_ID=${TG_USER_ID:-}
+TG_BOT_TOKEN=$TG_BOT_TOKEN
+TG_USER_ID=$TG_USER_ID
 EOF
 
-### Конфигурация Traefik
-cat > traefik.yml <<EOF
+chmod 600 .env
+
+### 5. Создание директорий и настройка прав
+mkdir -p traefik/{acme,logs} postgres-data pgadmin-data qdrant/storage backups data
+mkdir -p pgadmin-data/sessions
+touch traefik/acme/acme.json
+chmod 600 traefik/acme/acme.json
+chown -R 1000:1000 data backups
+chown -R 5050:5050 pgadmin-data
+chmod -R 700 pgadmin-data
+
+### 6. Конфиг Traefik (traefik.yml)
+cat > "traefik.yml" <<EOF
 global:
   sendAnonymousUsage: false
 
@@ -80,6 +86,7 @@ entryPoints:
         entryPoint:
           to: websecure
           scheme: https
+
   websecure:
     address: ":443"
 
@@ -98,8 +105,8 @@ certificatesResolvers:
         entryPoint: web
 EOF
 
-### Динамическая конфигурация Traefik
-cat > dynamic.yml <<EOF
+### 7. Динамический конфиг Traefik (dynamic.yml)
+cat > "dynamic.yml" <<EOF
 http:
   middlewares:
     compress:
@@ -141,20 +148,20 @@ http:
       loadBalancer:
         servers:
           - url: http://n8n:5678
+
     pgadmin:
       loadBalancer:
         servers:
           - url: http://pgadmin:80
+
     qdrant:
       loadBalancer:
         servers:
           - url: http://qdrant:6333
 EOF
 
-### Docker Compose конфигурация
-cat > docker-compose.yml <<EOF
-version: '3.8'
-
+### 8. Обновленный docker-compose.yml (без атрибута version)
+cat > "docker-compose.yml" <<EOF
 services:
   traefik:
     image: traefik:v2.10
@@ -167,9 +174,11 @@ services:
       - ./dynamic.yml:/etc/traefik/dynamic.yml
       - ./traefik/acme:/etc/traefik/acme
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - "traefik.enable=true"
 
   n8n:
-    image: n8nio/n8n
+    image: n8n-custom:latest
     restart: unless-stopped
     environment:
       - N8N_HOST=n8n.$BASE_DOMAIN
@@ -183,12 +192,15 @@ services:
       - DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}
     volumes:
       - ./data:/home/node/.n8n
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.rule=Host(\`n8n.$BASE_DOMAIN\`)"
     depends_on:
       - postgres
-      - redis
 
   postgres:
-    image: postgres:13-alpine
+    image: postgres:13
     restart: unless-stopped
     environment:
       - POSTGRES_PASSWORD=\${POSTGRES_PASSWORD}
@@ -209,6 +221,10 @@ services:
       - PGADMIN_DEFAULT_PASSWORD=\${PGADMIN_PASSWORD}
     volumes:
       - ./pgadmin-data:/var/lib/pgadmin
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin.entrypoints=websecure"
+      - "traefik.http.routers.pgadmin.rule=Host(\`pgadmin.$BASE_DOMAIN\`)"
     depends_on:
       - postgres
 
@@ -217,40 +233,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./qdrant/storage:/qdrant/storage
-
-  redis:
-    image: redis:6-alpine
-    restart: unless-stopped
-    command: redis-server --requirepass \${REDIS_PASSWORD}
-    volumes:
-      - ./redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-EOF
-
-### Настройка Telegram бота (если указаны токен и ID)
-if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_USER_ID" ]; then
-  echo "🤖 Настройка Telegram бота..."
-  mkdir -p $INSTALL_DIR/bot
-  cat > $INSTALL_DIR/bot/Dockerfile <<EOF
-FROM python:3.9-slim
-WORKDIR /app
-RUN pip install python-telegram-bot
-COPY bot.py .
-CMD ["python", "bot.py"]
-EOF
-
-  cat > $INSTALL_DIR/bot/bot.py <<EOF
-import os
-from telegram import Bot
-bot = Bot(token=os.getenv('TG_BOT_TOKEN'))
-bot.send_message(chat_id=os.getenv('TG_USER_ID'), text='✅ Установка завершена!')
-EOF
-
-  cat >> docker-compose.yml <<EOF
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.qdrant.entrypoints=websecure"
+      - "traefik.http.routers.qdrant.rule=Host(\`qdrant.$BASE_DOMAIN\`)"
+      - "traefik.http.services.qdrant.loadbalancer.server.port=6333"
 
   bot:
     build: ./bot
@@ -259,60 +246,80 @@ EOF
       - TG_BOT_TOKEN=\${TG_BOT_TOKEN}
       - TG_USER_ID=\${TG_USER_ID}
 EOF
-fi
 
-### Запуск системы
-echo "🚀 Запуск сервисов..."
+### 9. Сборка и запуск с улучшенной проверкой
+echo "🚀 Запуск системы..."
+docker build -f Dockerfile.n8n -t n8n-custom:latest .
+
+# Очистка предыдущих контейнеров (если есть)
+docker compose down --remove-orphans || true
+
+# Запуск с ожиданием готовности
 docker compose up -d
 
-### Настройка автообновлений
-echo "⏳ Настройка автообновлений..."
-cat > /usr/local/bin/update-n8n <<EOF
-#!/bin/bash
-cd $INSTALL_DIR
-docker compose pull
-docker compose up -d --force-recreate
-docker system prune -af
-EOF
-chmod +x /usr/local/bin/update-n8n
+echo "⏳ Ожидание запуска сервисов (до 2 минут)..."
+for i in {1..12}; do
+  if docker compose ps | grep -q "running"; then
+    break
+  fi
+  sleep 10
+  echo "⏳ Проверка состояния ($i/12)..."
+done
 
-(crontab -l 2>/dev/null; echo "0 3 * * 0 /usr/local/bin/update-n8n >> /var/log/n8n-update.log 2>&1") | crontab -
-
-### Проверка сервисов
-echo "🔍 Проверка состояния сервисов..."
-sleep 15
+### 10. Улучшенная проверка состояния
+echo "🔍 Детальная проверка состояния:"
 
 check_service() {
-  if docker compose ps $1 | grep -q "running"; then
-    echo "✅ $1 работает нормально"
+  local service=$1
+  local status=$(docker compose ps $service | awk 'NR==2 {print $4}')
+  
+  if [ "$status" = "running" ]; then
+    echo "✅ $service работает нормально"
     return 0
   else
-    echo "❌ $1 имеет проблемы"
-    docker compose logs $1 --tail=20
+    echo "❌ $service имеет проблемы (статус: $status)"
+    echo "=== Логи $service ==="
+    docker compose logs $service --tail=20
     return 1
   fi
 }
 
-services=("traefik" "n8n" "postgres" "pgadmin" "qdrant" "redis")
-[ -n "$TG_BOT_TOKEN" ] && services+=("bot")
+check_service traefik
+check_service n8n
+check_service postgres
+check_service pgadmin
+check_service qdrant
 
-for service in "${services[@]}"; do
-  check_service $service
+### 11. Настройка cron
+chmod +x ./backup_n8n.sh
+(crontab -l 2>/dev/null; echo "0 2 * * * /opt/n8n-install/backup_n8n.sh >> /opt/n8n-install/backup.log 2>&1") | crontab -
+
+### 12. Уведомление в Telegram
+curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+  -d chat_id=$TG_USER_ID \
+  -d text="✅ Установка завершена! Доступно:
+  • n8n: https://n8n.$BASE_DOMAIN
+  • pgAdmin: https://pgadmin.$BASE_DOMAIN
+  • Qdrant: https://qdrant.$BASE_DOMAIN"
+
+### 13. Финальная проверка
+echo "🔎 Проверка состояния сервисов..."
+for service in n8n pgadmin qdrant; do
+  if docker compose ps $service | grep -q "running"; then
+    echo "✅ $service работает нормально"
+  else
+    echo "❌ $service имеет проблемы. Проверьте логи: docker compose logs $service"
+  fi
 done
 
-### Отправка уведомления (если настроен бот)
-if [ -n "$TG_BOT_TOKEN" ]; then
-  echo "📨 Отправка уведомления в Telegram..."
-  docker compose exec bot python bot.py
-fi
+### 14. Финальный вывод
+echo "📦 Активные контейнеры:"
+docker ps --format "table {{.Names}}\t{{.Status}}"
 
-### Финальный вывод
-echo "🎉 Установка завершена!"
-echo "Доступные сервисы:"
-echo "- n8n: https://n8n.$BASE_DOMAIN"
-echo "- pgAdmin: https://pgadmin.$BASE_DOMAIN (логин: $EMAIL, пароль: $PGADMIN_PASSWORD)"
-echo "- Qdrant: https://qdrant.$BASE_DOMAIN"
-echo "- Redis пароль: $REDIS_PASSWORD"
-echo "- PostgreSQL пароль: $POSTGRES_PASSWORD"
+echo "🎉 Установка завершена! Доступные сервисы:"
+echo "  • n8n: https://n8n.$BASE_DOMAIN"
+echo "  • pgAdmin: https://pgadmin.$BASE_DOMAIN"
+echo "  • Qdrant: https://qdrant.$BASE_DOMAIN"
 echo ""
-echo "Автообновления настроены на каждое воскресенье в 3:00"
+echo "ℹ️  Если какие-то сервисы недоступны, проверьте логи командой:"
+echo "   docker compose logs [n8n|pgadmin|qdrant]"
