@@ -16,12 +16,12 @@ for pkg in git curl wget openssl; do
 done
 
 clear
-echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant (Traefik)"
+echo "🌐 Автоматическая установка n8n + pgAdmin + Qdrant + Redis (Traefik)"
 echo "-----------------------------------------------------------"
 
 ### 1. Ввод переменных
 read -p "🌐 Введите базовый домен (например: example.com): " BASE_DOMAIN
-read -p "📧 Введите email для Let's Encrypt: " EMAIL
+read -p "📧 Введите email для Let's Encrypt и pgAdmin: " EMAIL
 read -p "🔐 Введите пароль для Postgres: " POSTGRES_PASSWORD
 read -p "🔑 Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 read -p "🤖 Введите Telegram Bot Token: " TG_BOT_TOKEN
@@ -60,18 +60,20 @@ PGADMIN_PASSWORD=$PGADMIN_PASSWORD
 N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
 TG_BOT_TOKEN=$TG_BOT_TOKEN
 TG_USER_ID=$TG_USER_ID
+REDIS_HOST=redis
+REDIS_PORT=6379
 EOF
 
 chmod 600 .env
 
 ### 5. Создание директорий и настройка прав
-mkdir -p traefik/{acme,logs} postgres-data pgadmin-data qdrant/storage backups data
+mkdir -p traefik/{acme,logs} postgres-data pgadmin-data qdrant/storage redis-data backups data
 mkdir -p pgadmin-data/sessions
 touch traefik/acme/acme.json
 chmod 600 traefik/acme/acme.json
-chown -R 1000:1000 data backups
+chown -R 1000:1000 data backups redis-data
 chown -R 5050:5050 pgadmin-data
-chmod -R 700 pgadmin-data
+chmod -R 700 pgadmin-data redis-data
 
 ### 6. Конфиг Traefik (traefik.yml)
 cat > "traefik.yml" <<EOF
@@ -101,6 +103,7 @@ certificatesResolvers:
     acme:
       email: $EMAIL
       storage: /etc/traefik/acme/acme.json
+      caServer: "https://acme-staging-v02.api.letsencrypt.org/directory" # Staging для тестов
       httpChallenge:
         entryPoint: web
 EOF
@@ -160,7 +163,7 @@ http:
           - url: http://qdrant:6333
 EOF
 
-### 8. Обновленный docker-compose.yml (без атрибута version)
+### 8. Обновленный docker-compose.yml (с Redis)
 cat > "docker-compose.yml" <<EOF
 services:
   traefik:
@@ -190,6 +193,8 @@ services:
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}
+      - REDIS_HOST=\${REDIS_HOST}
+      - REDIS_PORT=\${REDIS_PORT}
     volumes:
       - ./data:/home/node/.n8n
     labels:
@@ -198,6 +203,7 @@ services:
       - "traefik.http.routers.n8n.rule=Host(\`n8n.$BASE_DOMAIN\`)"
     depends_on:
       - postgres
+      - redis
 
   postgres:
     image: postgres:13
@@ -239,6 +245,17 @@ services:
       - "traefik.http.routers.qdrant.rule=Host(\`qdrant.$BASE_DOMAIN\`)"
       - "traefik.http.services.qdrant.loadbalancer.server.port=6333"
 
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - ./redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     build: ./bot
     restart: unless-stopped
@@ -247,7 +264,7 @@ services:
       - TG_USER_ID=\${TG_USER_ID}
 EOF
 
-### 9. Сборка и запуск с улучшенной проверкой
+### 9. Сборка и запуск
 echo "🚀 Запуск системы..."
 docker build -f Dockerfile.n8n -t n8n-custom:latest .
 
@@ -259,67 +276,63 @@ docker compose up -d
 
 echo "⏳ Ожидание запуска сервисов (до 2 минут)..."
 for i in {1..12}; do
-  if docker compose ps | grep -q "running"; then
+  if docker compose ps | grep -q "Up"; then
     break
   fi
   sleep 10
   echo "⏳ Проверка состояния ($i/12)..."
 done
 
-### 10. Улучшенная проверка состояния
-echo "🔍 Детальная проверка состояния:"
+### 10. Проверка состояния сервисов
+echo "🔍 Проверка состояния сервисов..."
+docker compose ps
 
-check_service() {
-  local service=$1
-  local status=$(docker compose ps $service | awk 'NR==2 {print $4}')
-  
-  if [ "$status" = "running" ]; then
-    echo "✅ $service работает нормально"
-    return 0
-  else
-    echo "❌ $service имеет проблемы (статус: $status)"
-    echo "=== Логи $service ==="
-    docker compose logs $service --tail=20
-    return 1
-  fi
-}
-
-check_service traefik
-check_service n8n
-check_service postgres
-check_service pgadmin
-check_service qdrant
-
-### 11. Настройка cron
+### 11. Настройка cron для резервного копирования
 chmod +x ./backup_n8n.sh
 (crontab -l 2>/dev/null; echo "0 2 * * * /opt/n8n-install/backup_n8n.sh >> /opt/n8n-install/backup.log 2>&1") | crontab -
 
-### 12. Уведомление в Telegram
+### 12. Отправка данных доступа в Telegram
+echo "📬 Отправка данных доступа в Telegram..."
 curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
   -d chat_id=$TG_USER_ID \
   -d text="✅ Установка завершена! Доступно:
-  • n8n: https://n8n.$BASE_DOMAIN
-  • pgAdmin: https://pgadmin.$BASE_DOMAIN
-  • Qdrant: https://qdrant.$BASE_DOMAIN"
+  • n8n:
+    - URL: https://n8n.$BASE_DOMAIN
+    - Порт: 5678
+  • pgAdmin:
+    - URL: https://pgadmin.$BASE_DOMAIN
+    - Email: $EMAIL
+    - Пароль: $PGADMIN_PASSWORD
+  • Qdrant:
+    - URL: https://qdrant.$BASE_DOMAIN
+    - Порт: 6333
+  • PostgreSQL:
+    - Хост: postgres
+    - Порт: 5432
+    - База данных: n8n
+    - Пользователь: postgres
+    - Пароль: $POSTGRES_PASSWORD
+  • Redis:
+    - Хост: redis
+    - Порт: 6379"
 
-### 13. Финальная проверка
-echo "🔎 Проверка состояния сервисов..."
-for service in n8n pgadmin qdrant; do
-  if docker compose ps $service | grep -q "running"; then
-    echo "✅ $service работает нормально"
-  else
-    echo "❌ $service имеет проблемы. Проверьте логи: docker compose logs $service"
-  fi
-done
-
-### 14. Финальный вывод
-echo "📦 Активные контейнеры:"
-docker ps --format "table {{.Names}}\t{{.Status}}"
-
+### 13. Финальный вывод
 echo "🎉 Установка завершена! Доступные сервисы:"
 echo "  • n8n: https://n8n.$BASE_DOMAIN"
 echo "  • pgAdmin: https://pgadmin.$BASE_DOMAIN"
 echo "  • Qdrant: https://qdrant.$BASE_DOMAIN"
+echo "  • Redis: redis:6379 (внутренний сервис)"
 echo ""
-echo "ℹ️  Если какие-то сервисы недоступны, проверьте логи командой:"
-echo "   docker compose logs [n8n|pgadmin|qdrant]"
+echo "ℹ️ Данные доступа отправлены в Telegram."
+echo "ℹ️ Для подключения к PostgreSQL через pgAdmin:"
+echo "   - Хост: postgres"
+echo "   - Порт: 5432"
+echo "   - База данных: n8n"
+echo "   - Пользователь: postgres"
+echo "   - Пароль: см. в Telegram или .env (POSTGRES_PASSWORD)"
+echo "ℹ️ Для использования Redis в n8n:"
+echo "   - Хост: redis"
+echo "   - Порт: 6379"
+echo ""
+echo "ℹ️ Если сервисы недоступны, проверьте логи командой:"
+echo "   docker compose logs [n8n|pgadmin|qdrant|postgres|redis|traefik]"
