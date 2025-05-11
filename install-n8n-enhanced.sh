@@ -157,10 +157,8 @@ http:
           - url: http://qdrant:6333
 EOF
 
-### 8. Обновленный docker-compose.yml
+### 8. Обновленный docker-compose.yml (без version)
 cat > "docker-compose.yml" <<EOF
-version: '3.8'
-
 services:
   traefik:
     image: traefik:v2.10
@@ -195,6 +193,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.rule=Host(\`n8n.$BASE_DOMAIN\`)"
+    depends_on:
+      - postgres
 
   postgres:
     image: postgres:13
@@ -204,6 +204,11 @@ services:
       - POSTGRES_DB=n8n
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   pgadmin:
     image: dpage/pgadmin4
@@ -217,6 +222,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.pgadmin.entrypoints=websecure"
       - "traefik.http.routers.pgadmin.rule=Host(\`pgadmin.$BASE_DOMAIN\`)"
+    depends_on:
+      - postgres
 
   qdrant:
     image: qdrant/qdrant
@@ -237,26 +244,48 @@ services:
       - TG_USER_ID=\${TG_USER_ID}
 EOF
 
-### 9. Сборка и запуск
+### 9. Сборка и запуск с улучшенной проверкой
 echo "🚀 Запуск системы..."
 docker build -f Dockerfile.n8n -t n8n-custom:latest .
+
+# Очистка предыдущих контейнеров (если есть)
+docker compose down --remove-orphans || true
+
+# Запуск с ожиданием готовности
 docker compose up -d
 
-### 10. Проверка и исправление прав n8n
-echo "🔍 Проверка работы n8n..."
-sleep 15  # Ожидаем запуск сервисов
+echo "⏳ Ожидание запуска сервисов (до 2 минут)..."
+for i in {1..12}; do
+  if docker compose ps | grep -q "running"; then
+    break
+  fi
+  sleep 10
+  echo "⏳ Проверка состояния ($i/12)..."
+done
 
-if docker compose logs n8n | grep -q "404\|Bad Gateway\|EACCES"; then
-  echo "⚠️ Обнаружены проблемы с правами доступа. Исправляем..."
-  docker compose stop n8n
-  docker run --rm -it --user root \
-    -v /opt/n8n-install/data:/home/node/.n8n \
-    --entrypoint chown \
-    n8nio/base:16 \
-    -R node:node /home/node/.n8n
-  docker compose start n8n
-  echo "✅ Права доступа исправлены"
-fi
+### 10. Улучшенная проверка состояния
+echo "🔍 Детальная проверка состояния:"
+
+check_service() {
+  local service=$1
+  local status=$(docker compose ps $service | awk 'NR==2 {print $4}')
+  
+  if [ "$status" = "running" ]; then
+    echo "✅ $service работает нормально"
+    return 0
+  else
+    echo "❌ $service имеет проблемы (статус: $status)"
+    echo "=== Логи $service ==="
+    docker compose logs $service --tail=20
+    return 1
+  fi
+}
+
+check_service traefik
+check_service n8n
+check_service postgres
+check_service pgadmin
+check_service qdrant
 
 ### 11. Настройка cron
 chmod +x ./backup_n8n.sh
