@@ -1,203 +1,132 @@
 #!/bin/bash
+set -e
 
-# Настройка безопасного выполнения
-set -euo pipefail
-
-# Цвета для вывода
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
-
-# Логирование
-LOG_FILE="/root/n8n/logs/install.log"
-mkdir -p /root/n8n/logs
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo -e "${GREEN}Начинаем установку n8n, PostgreSQL, pgAdmin, Redis и Qdrant...${NC}"
-
-# Проверка прав root
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Пожалуйста, запустите скрипт с правами root (sudo)${NC}"
-    exit 1
+### Проверка прав
+if (( EUID != 0 )); then
+  echo "❗ Скрипт должен быть запущен от root: sudo bash <(curl ...)"
+  exit 1
 fi
 
-# 1. Обновление системы
-echo "Обновляем систему..."
-apt update && apt upgrade -y
+clear
+echo "🌐 Автоматическая установка n8n с GitHub"
+echo "----------------------------------------"
 
-# 2. Установка необходимых пакетов
-echo "Устанавливаем зависимости..."
-apt install -y curl software-properties-common ca-certificates gnupg2
+### 1. Ввод переменных
+read -p "🌐 Введите домен для n8n (например: n8n.example.com): " DOMAIN
+read -p "📧 Введите email для SSL-сертификата Let's Encrypt: " EMAIL
+read -p "🔐 Введите пароль для базы данных Postgres: " POSTGRES_PASSWORD
+read -p "🤖 Введите Telegram Bot Token: " TG_BOT_TOKEN
+read -p "👤 Введите Telegram User ID (для уведомлений): " TG_USER_ID
+read -p "🗝️  Введите ключ шифрования для n8n (Enter для генерации): " N8N_ENCRYPTION_KEY
 
-# 3. Установка Docker
-echo "Устанавливаем Docker..."
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-apt update
-apt install -y docker-ce docker-ce-cli containerd.io
+if [ -z "$N8N_ENCRYPTION_KEY" ]; then
+  N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)
+  echo "✅ Сгенерирован ключ шифрования: $N8N_ENCRYPTION_KEY"
+fi
 
-# 4. Установка Docker Compose
-echo "Устанавливаем Docker Compose..."
-COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'"' -f4)
-curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
+### 2. Установка Docker и Compose
+echo "📦 Проверка Docker..."
+if ! command -v docker &>/dev/null; then
+  curl -fsSL https://get.docker.com | sh
+fi
 
-# 5. Создание структуры каталогов
-echo "Создаем структуру каталогов..."
-mkdir -p /root/n8n/{.n8n,local-files,postgres,redis,qdrant,backups,pgadmin,logs,letsencrypt}
-chown -R 1000:1000 /root/n8n/.n8n
-chmod -R 750 /root/n8n/local-files
-chmod -R 700 /root/n8n/backups
-chmod -R 750 /root/n8n/pgadmin
-chmod 600 /root/n8n/postgres/pg_hba.conf
+echo "📦 Проверка NPM..."
+if ! command -v npm &>/dev/null; then
+  apt update && apt install -y npm
+fi
 
-# 6. Получение параметров установки
-read -p "Введите ваш домен (example.com): " DOMAIN_NAME
-read -p "Введите поддомен для n8n [n8n]: " SUBDOMAIN
-SUBDOMAIN=${SUBDOMAIN:-n8n}
-read -p "Введите логин для n8n: " N8N_BASIC_AUTH_USER
-read -sp "Введите пароль для n8n: " N8N_BASIC_AUTH_PASSWORD
-echo
-read -p "Введите пользователя PostgreSQL: " POSTGRES_USER
-read -sp "Введите пароль PostgreSQL: " POSTGRES_PASSWORD
-echo
-read -p "Введите email для pgAdmin: " PGADMIN_EMAIL
-read -sp "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
-echo
-read -p "Введите пароль Redis: " REDIS_PASSWORD
-read -p "Введите email для SSL: " SSL_EMAIL
-read -p "Введите часовой пояс [Europe/Moscow]: " GENERIC_TIMEZONE
-GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-Europe/Moscow}
+if ! command -v docker compose &>/dev/null; then
+  curl -SL https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+  ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose || true
+fi
 
-# 7. Создание конфигурационных файлов
-echo "Создаем docker-compose.yml..."
-cat > /root/docker-compose.yml << EOF
-version: "3.8"
+### 3. Клонирование проекта с GitHub
+echo "📥 Клонируем проект с GitHub..."
+rm -rf /opt/n8n-install
+git clone https://github.com/kalininlive/n8n-beget-install.git /opt/n8n-install
+cd /opt/n8n-install
 
-services:
-  traefik:
-    image: traefik:v2.10
-    restart: always
-    command:
-      - "--api.insecure=true"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.email=${SSL_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-    ports:
-      - "443:443"
-      - "8080:8080"
-    volumes:
-      - /root/n8n/letsencrypt:/letsencrypt
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  n8n:
-    image: n8nio/n8n:latest
-    restart: always
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.n8n.rule=Host(\`${SUBDOMAIN}.${DOMAIN_NAME}\`)
-      - traefik.http.routers.n8n.tls=true
-      - traefik.http.routers.n8n.tls.certresolver=letsencrypt
-      - traefik.http.services.n8n.loadbalancer.server.port=5678
-    environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
-      - N8N_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=${POSTGRES_USER}
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
-    volumes:
-      - /root/n8n/.n8n:/home/node/.n8n
-      - /root/n8n/local-files:/files
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:16
-    restart: always
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=n8n
-    volumes:
-      - /root/n8n/postgres:/var/lib/postgresql/data
-      - /root/n8n/postgres/pg_hba.conf:/docker-entrypoint-initdb.d/pg_hba.conf
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    restart: always
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
-    volumes:
-      - /root/n8n/pgadmin:/var/lib/pgadmin
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.pgadmin.rule=Host(\`pgadmin.${DOMAIN_NAME}\`)
-      - traefik.http.routers.pgadmin.tls=true
-      - traefik.http.routers.pgadmin.tls.certresolver=letsencrypt
-      - traefik.http.services.pgadmin.loadbalancer.server.port=80
-
-  redis:
-    image: redis:7
-    restart: always
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    volumes:
-      - /root/n8n/redis:/data
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    restart: always
-    volumes:
-      - /root/n8n/qdrant:/qdrant/storage
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.qdrant.rule=Host(\`qdrant.${DOMAIN_NAME}\`)
-      - traefik.http.routers.qdrant.tls=true
-      - traefik.http.routers.qdrant.tls.certresolver=letsencrypt
-      - traefik.http.services.qdrant.loadbalancer.server.port=6333
+### 4. Генерация .env файлов
+cat > ".env" <<EOF
+DOMAIN=$DOMAIN
+EMAIL=$EMAIL
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
+N8N_EXPRESS_TRUST_PROXY=true
+TG_BOT_TOKEN=$TG_BOT_TOKEN
+TG_USER_ID=$TG_USER_ID
 EOF
 
-# 8. Настройка PostgreSQL
-echo "Настраиваем PostgreSQL..."
-cat > /root/n8n/postgres/pg_hba.conf << EOF
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-host    all             all             0.0.0.0/0               md5
-local   all             all                                     md5
+cat > "bot/.env" <<EOF
+TG_BOT_TOKEN=$TG_BOT_TOKEN
+TG_USER_ID=$TG_USER_ID
 EOF
 
-# 9. Запуск сервисов
-echo "Запускаем сервисы..."
-docker-compose up -d
+chmod 600 .env bot/.env
 
-# 10. Дополнительные настройки
-echo "Настраиваем права доступа..."
-docker run --rm -v /root/n8n/.n8n:/home/node/.n8n --user root n8nio/n8n chown -R node:node /home/node/.n8n
+### 4.1 Создание нужных директорий и логов
+mkdir -p logs backups traefik/acme
+touch backup.log
+chown -R 1000:1000 logs backups backup.log
+chmod -R 755 logs backups
 
-# 11. Проверка работы
-echo "Проверяем работу сервисов..."
-sleep 10
-docker ps -a
+### 4.2 Настройка Traefik для боевого режима
+cat > "traefik/traefik.yml" <<EOF
+global:
+  sendAnonymousUsage: false
 
-echo -e "${GREEN}Установка завершена успешно!${NC}"
-echo -e "Доступ к сервисам:"
-echo -e "- n8n: https://${SUBDOMAIN}.${DOMAIN_NAME}"
-echo -e "- pgAdmin: https://pgadmin.${DOMAIN_NAME}"
-echo -e "- Qdrant: https://qdrant.${DOMAIN_NAME}"
-echo -e "Для диагностики используйте: docker logs root_n8n_1"
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: $EMAIL
+      storage: /etc/traefik/acme/acme.json
+      httpChallenge:
+        entryPoint: web
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic_conf.yml
+    watch: true
+
+log:
+  level: DEBUG
+EOF
+
+### 5. Сборка кастомного образа n8n
+docker build -f Dockerfile.n8n -t n8n-custom:latest .
+
+### 6. Запуск docker compose (включая Telegram-бота)
+docker compose up -d --force-recreate
+
+### 7. Проверка сертификатов
+echo "🔍 Проверка выдачи SSL-сертификата..."
+sleep 30  # Даем время Traefik получить сертификат
+docker compose logs traefik | grep -i acme
+
+### 8. Настройка cron
+chmod +x ./backup_n8n.sh
+(crontab -l 2>/dev/null; echo "0 2 * * * /opt/n8n-install/backup_n8n.sh >> /opt/n8n-install/backup.log 2>&1") | crontab -
+
+### 9. Уведомление в Telegram
+curl -s -X POST https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage \
+  -d chat_id=$TG_USER_ID \
+  -d text="✅ Установка n8n завершена. Домен: https://$DOMAIN"
+
+### 10. Финальный вывод
+echo "📦 Активные контейнеры:"
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+echo "🔐 Проверьте SSL сертификат:"
+echo "openssl s_client -connect $DOMAIN:443 -servername $DOMAIN | openssl x509 -noout -dates"
+
+echo "🔄 Если сертификат не выдался, проверьте логи:"
+echo "docker compose logs traefik -f"
+
+echo "🎉 Готово! Открой: https://$DOMAIN"
